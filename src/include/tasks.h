@@ -23,6 +23,9 @@
  *==============================================================================*/
 
 void firmware_upgrade_task(device_t *);
+#ifdef DH_INJECT
+void inject_task(device_t *);
+#endif
 void heartbeat_output_task(device_t *);
 void kick_watchdog_task(device_t *);
 void led_blinking_task(device_t *);
