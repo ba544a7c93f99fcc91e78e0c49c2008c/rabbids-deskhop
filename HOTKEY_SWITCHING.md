@@ -11,23 +11,29 @@ indépendants, chacun avec son écran.
 
 | Combinaison (défaut) | Effet | Switch lock |
 |---|---|---|
-| **Right Ctrl + Right Shift + F3** | Toggle A↔B (boucle) | respecté |
-| **Right Ctrl + Right Shift + F1** | Va **toujours** sur A (garanti) | ignoré (forcé) |
-| **Right Ctrl + Right Shift + F2** | Va **toujours** sur B (garanti) | ignoré (forcé) |
+| **Scroll Lock + F3** | Toggle A↔B (boucle) | respecté |
+| **Scroll Lock + F1** | Va **toujours** sur A (garanti) | ignoré (forcé) |
+| **Scroll Lock + F2** | Va **toujours** sur B (garanti) | ignoré (forcé) |
 
 Configurable dans `src/include/user_config.h` :
 
 ```c
-#define HOTKEY_SWITCH_MODIFIER (KEYBOARD_MODIFIER_RIGHTCTRL | KEYBOARD_MODIFIER_RIGHTSHIFT)
-#define HOTKEY_SELECT_A        HID_KEY_F1   // toujours A
-#define HOTKEY_SELECT_B        HID_KEY_F2   // toujours B
-#define HOTKEY_SWITCH_TOGGLE   HID_KEY_F3   // toggle A<->B
+#define HOTKEY_SWITCH_MODIFIER 0                   // modificateur optionnel (0 = aucun)
+#define HOTKEY_SWITCH_ARM      HID_KEY_SCROLL_LOCK // touche d'armement maintenue
+#define HOTKEY_SELECT_A        HID_KEY_F1          // toujours A
+#define HOTKEY_SELECT_B        HID_KEY_F2          // toujours B
+#define HOTKEY_SWITCH_TOGGLE   HID_KEY_F3          // toggle A<->B
 #define HOTKEY_BUFFER_TIMEOUT_MS 60
 ```
 
-> **Pourquoi les modificateurs de droite ?** Voir §3 : cela évite de retenir le
-> Ctrl/Shift de gauche du travail quotidien, donc zéro latence sur la frappe
-> normale.
+> **Pourquoi Scroll Lock ?** C'est statistiquement la touche la moins utilisée sur
+> un clavier PC de bureau, donc la retenir ne coûte quasiment rien au quotidien.
+> Comme le combo est avalé, l'état Scroll Lock n'est même jamais basculé sur le PC.
+>
+> **Clavier Apple** (pas de Scroll Lock) : utiliser `F13` (claviers pleine taille)
+> ou un modificateur de droite comme `HOTKEY_SWITCH_ARM`. DeskHop lit le clavier
+> *physique*, pas l'OS : c'est le clavier branché qui détermine les touches
+> disponibles, pas le fait qu'un des PC soit un Mac.
 
 ---
 
@@ -59,10 +65,10 @@ mécanisme ; les autres hotkeys gardent le comportement d'origine.
 
 ### Pourquoi la frappe normale n'est pas pénalisée
 
-Le préfixe gardé utilise **Right Ctrl + Right Shift**. Un Ctrl/Shift **de gauche**
-(Ctrl+C, Maj+clic…) n'est pas un sous-ensemble de ce hotkey → il passe
-**immédiatement**, sans aucune retenue. Seul le maintien des modificateurs de
-**droite** sans touche suivante subit le timeout — cas rare.
+Le préfixe gardé est **Scroll Lock**, que personne ne maintient au quotidien.
+Toute touche normale (lettres, Ctrl+C, Maj+clic…) n'est pas un sous-ensemble du
+hotkey → elle passe **immédiatement**, sans aucune retenue. Seul le maintien de
+Scroll Lock seul subit le timeout — ce qui n'arrive en pratique jamais.
 
 ---
 
@@ -100,7 +106,7 @@ Retenir tout préfixe de hotkey jusqu'à résolution.
 - **+** Seule méthode **littéralement zéro octet** (ni touche ni modificateur).
 - **+** Touches A/B dédiées + toggle, tout est possible.
 - **+** Divergence → relâche en ~1 rapport, donc la frappe normale n'est pas gênée
-  (d'autant que le préfixe utilise les modificateurs de droite).
+  (d'autant que le préfixe est une touche inutilisée).
 - **−** Plus de code (machine à états, tâche de flush).
 - **−** Maintenir le préfixe exact avec la souris subit jusqu'à `TIMEOUT` ms de
   latence (atténué par le choix des modificateurs de droite).
@@ -131,10 +137,10 @@ réglage est persistant (`config_t.switch_hotkey_only`, flash).
 
 ## 5. Limites
 
-- **Maintien d'un modificateur de droite avec la souris** (Right Ctrl + clic) :
-  jusqu'à `HOTKEY_BUFFER_TIMEOUT_MS` de latence sur ce modificateur. Mettre le
-  timeout plus bas, ou utiliser un modificateur encore moins courant, réduit le
-  cas.
+- **Maintien de la touche d'armement avec la souris** (Scroll Lock + clic) :
+  jusqu'à `HOTKEY_BUFFER_TIMEOUT_MS` de latence. Avec Scroll Lock ce cas ne se
+  produit jamais en pratique ; il ne deviendrait sensible qu'avec une touche
+  d'armement réellement utilisée (p. ex. un modificateur).
 - **Deux claviers branchés en même temps** : l'état clavier est combiné
   (`combine_kbd_states`) ; un préfixe retenu sur un clavier pourrait partir via un
   rapport de l'autre. Cas limite (la majorité des montages ont un seul clavier).

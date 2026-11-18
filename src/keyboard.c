@@ -19,16 +19,16 @@ hotkey_combo_t hotkeys[] = {
     /* Main keyboard switching hotkey */
     /* Toggle A<->B. Guarded: no part of the combo reaches the PC. */
     {.modifier       = HOTKEY_SWITCH_MODIFIER,
-     .keys           = {HOTKEY_SWITCH_TOGGLE},
-     .key_count      = 1,
+     .keys           = {HOTKEY_SWITCH_ARM, HOTKEY_SWITCH_TOGGLE},
+     .key_count      = 2,
      .pass_to_os     = false,
      .guard          = true,
      .action_handler = &output_toggle_hotkey_handler},
 
     /* Dedicated: always switch to output A */
     {.modifier       = HOTKEY_SWITCH_MODIFIER,
-     .keys           = {HOTKEY_SELECT_A},
-     .key_count      = 1,
+     .keys           = {HOTKEY_SWITCH_ARM, HOTKEY_SELECT_A},
+     .key_count      = 2,
      .pass_to_os     = false,
      .acknowledge    = true,
      .guard          = true,
@@ -36,8 +36,8 @@ hotkey_combo_t hotkeys[] = {
 
     /* Dedicated: always switch to output B */
     {.modifier       = HOTKEY_SWITCH_MODIFIER,
-     .keys           = {HOTKEY_SELECT_B},
-     .key_count      = 1,
+     .keys           = {HOTKEY_SWITCH_ARM, HOTKEY_SELECT_B},
+     .key_count      = 2,
      .pass_to_os     = false,
      .acknowledge    = true,
      .guard          = true,

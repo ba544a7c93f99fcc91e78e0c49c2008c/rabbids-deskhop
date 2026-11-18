@@ -76,15 +76,20 @@
  * combination (not even the leading modifier) is ever delivered. See
  * HOTKEY_SWITCHING.md for the full rationale and the alternatives considered.
  *
- * The arming modifier uses the RIGHT-side Ctrl+Shift on purpose: left-side
- * Ctrl/Shift (used in everyday shortcuts and mouse combos) are then never
- * withheld, so normal typing keeps zero added latency.
+ * The arming key is Scroll Lock: statistically the least-used key on a desktop
+ * PC keyboard, so withholding it has essentially no everyday cost. Because the
+ * combo is swallowed, Scroll Lock's own state is never toggled on the PC.
+ * (On an Apple keyboard without Scroll Lock, use F13 or a right-side modifier
+ * instead - see HOTKEY_SWITCHING.md.)
  *
- *   HOTKEY_SWITCH_MODIFIER + HOTKEY_SELECT_A -> always output A
- *   HOTKEY_SWITCH_MODIFIER + HOTKEY_SELECT_B -> always output B
- *   HOTKEY_SWITCH_MODIFIER + HOTKEY_SWITCH_TOGGLE -> toggle A<->B
+ *   HOTKEY_SWITCH_ARM + HOTKEY_SELECT_A -> always output A
+ *   HOTKEY_SWITCH_ARM + HOTKEY_SELECT_B -> always output B
+ *   HOTKEY_SWITCH_ARM + HOTKEY_SWITCH_TOGGLE -> toggle A<->B
+ *
+ * HOTKEY_SWITCH_MODIFIER is an optional extra modifier (0 = none).
  */
-#define HOTKEY_SWITCH_MODIFIER (KEYBOARD_MODIFIER_RIGHTCTRL | KEYBOARD_MODIFIER_RIGHTSHIFT)
+#define HOTKEY_SWITCH_MODIFIER 0
+#define HOTKEY_SWITCH_ARM      HID_KEY_SCROLL_LOCK
 #define HOTKEY_SELECT_A        HID_KEY_F1
 #define HOTKEY_SELECT_B        HID_KEY_F2
 #define HOTKEY_SWITCH_TOGGLE   HID_KEY_F3
