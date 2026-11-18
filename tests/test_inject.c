@@ -157,19 +157,23 @@ static void test_parse_type(void) {
     CHECK(cmd.kind == INJ_TYPE && strcmp(cmd.text, " leading-space") == 0,
           "type keeps 2nd+ space");
 
-    /* truncation to INJECT_MAX_TEXT-1 and NUL termination */
+    /* exactly MAX-1 chars is accepted and kept whole */
     char line[128];
-    char expect[INJECT_MAX_TEXT];
     strcpy(line, "type ");
-    for (int i = 0; i < 100; i++)
+    for (int i = 0; i < INJECT_MAX_TEXT - 1; i++)
         line[5 + i] = 'x';
-    line[5 + 100] = '\0';
+    line[5 + INJECT_MAX_TEXT - 1] = '\0';
     inject_parse_line(line, &cmd);
-    CHECK(cmd.kind == INJ_TYPE, "long type still INJ_TYPE");
-    CHECK(strlen(cmd.text) == INJECT_MAX_TEXT - 1, "type truncated to MAX-1");
-    memset(expect, 'x', INJECT_MAX_TEXT - 1);
-    expect[INJECT_MAX_TEXT - 1] = '\0';
-    CHECK(strcmp(cmd.text, expect) == 0, "truncated content correct + NUL-terminated");
+    CHECK(cmd.kind == INJ_TYPE && strlen(cmd.text) == INJECT_MAX_TEXT - 1,
+          "type of exactly MAX-1 chars accepted");
+
+    /* one char too long is REJECTED (no silent truncation) */
+    strcpy(line, "type ");
+    for (int i = 0; i < INJECT_MAX_TEXT; i++)
+        line[5 + i] = 'x';
+    line[5 + INJECT_MAX_TEXT] = '\0';
+    inject_parse_line(line, &cmd);
+    CHECK(cmd.kind == INJ_ERROR, "overlong type -> INJ_ERROR (not truncated)");
 }
 
 static void test_parse_key(void) {
@@ -206,6 +210,22 @@ static void test_parse_move(void) {
 
     inject_parse_line("move 10 abc", &cmd);
     CHECK(cmd.kind == INJ_ERROR, "non-numeric arg -> INJ_ERROR");
+
+    /* range checks: relative deltas fit int16; absolute is 0..32767 */
+    inject_parse_line("moveto 40000 0", &cmd);
+    CHECK(cmd.kind == INJ_ERROR, "moveto beyond 32767 -> INJ_ERROR (no wrap)");
+
+    inject_parse_line("moveto -1 0", &cmd);
+    CHECK(cmd.kind == INJ_ERROR, "moveto negative -> INJ_ERROR");
+
+    inject_parse_line("moveto 32767 32767", &cmd);
+    CHECK(cmd.kind == INJ_MOVETO && cmd.x == 32767 && cmd.y == 32767, "moveto at max ok");
+
+    inject_parse_line("move 40000 0", &cmd);
+    CHECK(cmd.kind == INJ_ERROR, "move delta beyond int16 -> INJ_ERROR");
+
+    inject_parse_line("move -200 200", &cmd);
+    CHECK(cmd.kind == INJ_MOVE && cmd.x == -200 && cmd.y == 200, "move negative delta ok");
 }
 
 static void test_parse_click(void) {
@@ -302,12 +322,151 @@ static void test_parse_hold(void) {
     inject_parse_line("release", &cmd);
     CHECK(cmd.kind == INJ_RELEASE_ALL, "release alias -> INJ_RELEASE_ALL");
 
-    inject_parse_line("shortcut ctrl+alt+del", &cmd);
-    CHECK(cmd.kind == INJ_KEY && cmd.modifier == 0x05 && cmd.keycode == 0x4C,
-          "shortcut alias -> INJ_KEY (tap)");
-
     inject_parse_line("key_down bogus+", &cmd);
     CHECK(cmd.kind == INJ_ERROR, "key_down with bad chord -> INJ_ERROR");
+}
+
+/* shortcut: one or more space-separated chords (remote-hid keyboard_shortcut) */
+static void test_parse_shortcut(void) {
+    printf("test_parse_shortcut\n");
+    inject_cmd_t cmd;
+
+    /* single chord */
+    inject_parse_line("shortcut ctrl+alt+del", &cmd);
+    CHECK(cmd.kind == INJ_SHORTCUT && cmd.nchords == 1, "shortcut one chord");
+    CHECK(cmd.chords[0].modifier == (MOD_CTRL | MOD_ALT) && cmd.chords[0].keycode == KC_DELETE,
+          "shortcut chord0 = ctrl+alt+del");
+
+    /* multiple chords, VS Code style */
+    inject_parse_line("shortcut ctrl+k ctrl+s", &cmd);
+    CHECK(cmd.kind == INJ_SHORTCUT && cmd.nchords == 2, "shortcut two chords");
+    CHECK(cmd.chords[0].modifier == MOD_CTRL && cmd.chords[0].keycode == (KC_A + ('k' - 'a')),
+          "shortcut chord0 = ctrl+k");
+    CHECK(cmd.chords[1].modifier == MOD_CTRL && cmd.chords[1].keycode == (KC_A + ('s' - 'a')),
+          "shortcut chord1 = ctrl+s");
+
+    /* a chord without a real key is rejected (shortcut needs a key per chord) */
+    inject_parse_line("shortcut ctrl+shift", &cmd);
+    CHECK(cmd.kind == INJ_ERROR, "shortcut modifier-only chord -> INJ_ERROR");
+
+    /* empty shortcut -> error */
+    inject_parse_line("shortcut", &cmd);
+    CHECK(cmd.kind == INJ_ERROR, "shortcut with no chord -> INJ_ERROR");
+
+    /* 'primary' is an accepted (ctrl) modifier alias */
+    inject_parse_line("shortcut primary+c", &cmd);
+    CHECK(cmd.kind == INJ_SHORTCUT && cmd.chords[0].modifier == MOD_CTRL &&
+          cmd.chords[0].keycode == (KC_A + ('c' - 'a')), "primary+c -> ctrl+c");
+}
+
+/* click with count + held modifiers (remote-hid mouse_click options) */
+static void test_parse_click_opts(void) {
+    printf("test_parse_click_opts\n");
+    inject_cmd_t cmd;
+
+    inject_parse_line("click left 2", &cmd);
+    CHECK(cmd.kind == INJ_CLICK && cmd.buttons == INJECT_BTN_LEFT && cmd.count == 2,
+          "click left 2 -> double click");
+
+    inject_parse_line("click 3", &cmd);
+    CHECK(cmd.kind == INJ_CLICK && cmd.buttons == INJECT_BTN_LEFT && cmd.count == 3,
+          "click 3 -> triple, default left");
+
+    inject_parse_line("click right ctrl+shift", &cmd);
+    CHECK(cmd.kind == INJ_CLICK && cmd.buttons == INJECT_BTN_RIGHT &&
+          cmd.modifier == (MOD_CTRL | MOD_SHIFT) && cmd.count == 1,
+          "click right ctrl+shift -> modifiers held, count 1");
+
+    /* order-independent: modifiers before button, count anywhere */
+    inject_parse_line("click shift middle 2", &cmd);
+    CHECK(cmd.kind == INJ_CLICK && cmd.buttons == INJECT_BTN_MIDDLE &&
+          cmd.modifier == MOD_SHIFT && cmd.count == 2, "click shift middle 2");
+
+    /* count out of range -> error */
+    inject_parse_line("click 0", &cmd);
+    CHECK(cmd.kind == INJ_ERROR, "click 0 -> INJ_ERROR");
+    inject_parse_line("click 99", &cmd);
+    CHECK(cmd.kind == INJ_ERROR, "click 99 (> max) -> INJ_ERROR");
+
+    /* a real key (not a modifier) in the modifier slot -> error */
+    inject_parse_line("click left a", &cmd);
+    CHECK(cmd.kind == INJ_ERROR, "click with non-modifier chord -> INJ_ERROR");
+}
+
+/* mouse_down / mouse_up (remote-hid button hold/release) */
+static void test_parse_mouse_hold(void) {
+    printf("test_parse_mouse_hold\n");
+    inject_cmd_t cmd;
+
+    inject_parse_line("mouse_down", &cmd);
+    CHECK(cmd.kind == INJ_MOUSE_DOWN && cmd.buttons == INJECT_BTN_LEFT,
+          "mouse_down -> left default");
+
+    inject_parse_line("mdown right", &cmd);
+    CHECK(cmd.kind == INJ_MOUSE_DOWN && cmd.buttons == INJECT_BTN_RIGHT,
+          "mdown right alias");
+
+    inject_parse_line("mouse_up middle", &cmd);
+    CHECK(cmd.kind == INJ_MOUSE_UP && cmd.buttons == INJECT_BTN_MIDDLE, "mouse_up middle");
+
+    inject_parse_line("mup", &cmd);
+    CHECK(cmd.kind == INJ_MOUSE_UP && cmd.buttons == INJECT_BTN_LEFT, "mup alias default left");
+
+    inject_parse_line("mouse_down bogus", &cmd);
+    CHECK(cmd.kind == INJ_ERROR, "mouse_down bogus -> INJ_ERROR");
+}
+
+/* drag: press + relative move + release (remote-hid mouse_drag) */
+static void test_parse_drag(void) {
+    printf("test_parse_drag\n");
+    inject_cmd_t cmd;
+
+    inject_parse_line("drag 40 -20", &cmd);
+    CHECK(cmd.kind == INJ_DRAG && cmd.x == 40 && cmd.y == -20 &&
+          cmd.buttons == INJECT_BTN_LEFT, "drag 40 -20 -> left default");
+
+    inject_parse_line("drag 10 10 right", &cmd);
+    CHECK(cmd.kind == INJ_DRAG && cmd.buttons == INJECT_BTN_RIGHT, "drag with button");
+
+    inject_parse_line("drag 5 5 left ctrl", &cmd);
+    CHECK(cmd.kind == INJ_DRAG && cmd.buttons == INJECT_BTN_LEFT && cmd.modifier == MOD_CTRL,
+          "drag with button + held modifier");
+
+    inject_parse_line("drag 10 abc", &cmd);
+    CHECK(cmd.kind == INJ_ERROR, "drag non-numeric -> INJ_ERROR");
+
+    inject_parse_line("drag 40000 0", &cmd);
+    CHECK(cmd.kind == INJ_ERROR, "drag delta beyond int16 -> INJ_ERROR");
+}
+
+/* scroll with held modifiers (remote-hid mouse_scroll options) */
+static void test_parse_scroll_opts(void) {
+    printf("test_parse_scroll_opts\n");
+    inject_cmd_t cmd;
+
+    inject_parse_line("scroll 5 ctrl", &cmd);
+    CHECK(cmd.kind == INJ_SCROLL && cmd.y == 5 && cmd.modifier == MOD_CTRL,
+          "scroll 5 ctrl -> zoom-style, ctrl held");
+
+    inject_parse_line("scroll -2 shift+alt", &cmd);
+    CHECK(cmd.kind == INJ_SCROLL && cmd.y == -2 && cmd.modifier == (MOD_SHIFT | MOD_ALT),
+          "scroll -2 shift+alt");
+
+    /* a button token is meaningless for scroll -> error */
+    inject_parse_line("scroll 3 left", &cmd);
+    CHECK(cmd.kind == INJ_ERROR, "scroll with button token -> INJ_ERROR");
+
+    /* missing amount -> error */
+    inject_parse_line("scroll", &cmd);
+    CHECK(cmd.kind == INJ_ERROR, "scroll with no amount -> INJ_ERROR");
+
+    /* out of int8 range -> error (would otherwise wrap / invert direction) */
+    inject_parse_line("scroll 200", &cmd);
+    CHECK(cmd.kind == INJ_ERROR, "scroll 200 -> INJ_ERROR");
+    inject_parse_line("scroll 127", &cmd);
+    CHECK(cmd.kind == INJ_SCROLL && cmd.y == 127, "scroll 127 at max ok");
+    inject_parse_line("scroll -128", &cmd);
+    CHECK(cmd.kind == INJ_ERROR, "scroll -128 (beyond -127) -> INJ_ERROR");
 }
 
 /* ----- main ------------------------------------------------------------ */
@@ -319,9 +478,14 @@ int main(void) {
     test_parse_type();
     test_parse_key();
     test_parse_hold();
+    test_parse_shortcut();
     test_parse_move();
     test_parse_click();
+    test_parse_click_opts();
+    test_parse_mouse_hold();
+    test_parse_drag();
     test_parse_scroll();
+    test_parse_scroll_opts();
     test_parse_delay();
     test_parse_target();
     test_parse_misc();

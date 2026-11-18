@@ -27,10 +27,10 @@ enum {
 };
 
 enum {
-    MOD_CTRL  = 0x01,
-    MOD_SHIFT = 0x02,
-    MOD_ALT   = 0x04,
-    MOD_GUI   = 0x08,
+    MOD_CTRL  = INJECT_MOD_CTRL,
+    MOD_SHIFT = INJECT_MOD_SHIFT,
+    MOD_ALT   = INJECT_MOD_ALT,
+    MOD_GUI   = INJECT_MOD_GUI,
 };
 
 bool inject_ascii_to_hid(char c, uint8_t *keycode, bool *shift) {
@@ -111,11 +111,13 @@ bool inject_keyname(const char *name, uint8_t *code, bool *is_modifier) {
         return inject_ascii_to_hid(name[0], code, &shift);
     }
 
-    /* Modifiers. */
-    if (name_eq(name, "ctrl") || name_eq(name, "control")) { *code = MOD_CTRL;  *is_modifier = true; return true; }
+    /* Modifiers. "primary" mirrors remote-hid's portable modifier; on the PC
+       targets this project drives it is Ctrl (there is no host-OS probe here). */
+    if (name_eq(name, "ctrl") || name_eq(name, "control") || name_eq(name, "primary"))
+                                                           { *code = MOD_CTRL;  *is_modifier = true; return true; }
     if (name_eq(name, "shift"))                            { *code = MOD_SHIFT; *is_modifier = true; return true; }
     if (name_eq(name, "alt"))                              { *code = MOD_ALT;   *is_modifier = true; return true; }
-    if (name_eq(name, "gui") || name_eq(name, "win") || name_eq(name, "cmd"))
+    if (name_eq(name, "gui") || name_eq(name, "win") || name_eq(name, "cmd") || name_eq(name, "super"))
                                                            { *code = MOD_GUI;   *is_modifier = true; return true; }
 
     /* Named keys. */
@@ -229,6 +231,46 @@ static bool parse_chord(const char *tok, uint8_t *modifier, uint8_t *keycode, bo
     return allow_mod_only && have_any; /* modifier-only allowed only for hold/release */
 }
 
+/* Match a mouse button name; returns true and sets *btn on left/right/middle. */
+static bool parse_button(const char *tok, uint8_t *btn) {
+    if (name_eq(tok, "left"))   { *btn = INJECT_BTN_LEFT;   return true; }
+    if (name_eq(tok, "right"))  { *btn = INJECT_BTN_RIGHT;  return true; }
+    if (name_eq(tok, "middle")) { *btn = INJECT_BTN_MIDDLE; return true; }
+    return false;
+}
+
+/* Parse the optional trailing tokens shared by `click` and `drag`: a button
+   name, a repeat count (digits, click only), and/or a modifier-only chord held
+   for the action. Tokens may appear in any order. Returns false on an
+   unrecognized token. The button, count and mods outputs must be
+   pre-initialized by the caller. */
+static bool parse_mouse_opts(const char *rest, uint8_t *button, uint8_t *count,
+                             uint8_t *mods, bool allow_count) {
+    char tok[24];
+    while (1) {
+        rest = next_token(rest, tok, sizeof(tok));
+        if (tok[0] == '\0')
+            return true;
+
+        if (parse_button(tok, button))
+            continue;
+
+        if (allow_count && count && tok[0] >= '0' && tok[0] <= '9') {
+            long n;
+            if (!parse_int(tok, &n) || n < 1 || n > INJECT_MAX_COUNT)
+                return false;
+            *count = (uint8_t)n;
+            continue;
+        }
+
+        /* Otherwise it must be a modifier-only chord (held for the action). */
+        uint8_t m, k;
+        if (!parse_chord(tok, &m, &k, true) || k != 0)
+            return false;
+        *mods |= m;
+    }
+}
+
 void inject_parse_line(const char *line, inject_cmd_t *cmd) {
     memset(cmd, 0, sizeof(*cmd));
 
@@ -245,8 +287,14 @@ void inject_parse_line(const char *line, inject_cmd_t *cmd) {
         /* The literal is the remainder after exactly one separating space. */
         if (*rest == ' ' || *rest == '\t')
             rest++;
+        /* Reject rather than silently truncate: the caller gets "err" and can
+           split the text instead of believing a cut string was typed. */
+        if (strlen(rest) > INJECT_MAX_TEXT - 1) {
+            cmd->kind = INJ_ERROR;
+            return;
+        }
         size_t i = 0;
-        while (rest[i] && i < INJECT_MAX_TEXT - 1) {
+        while (rest[i]) {
             cmd->text[i] = rest[i];
             i++;
         }
@@ -255,7 +303,30 @@ void inject_parse_line(const char *line, inject_cmd_t *cmd) {
         return;
     }
 
-    if (name_eq(verb, "key") || name_eq(verb, "shortcut")
+    /* shortcut: one or more space-separated chords, tapped in order
+       (remote-hid keyboard_shortcut, e.g. "ctrl+k ctrl+s"). */
+    if (name_eq(verb, "shortcut")) {
+        char tok[24];
+        uint8_t n = 0;
+        while (1) {
+            rest = next_token(rest, tok, sizeof(tok));
+            if (tok[0] == '\0')
+                break;
+            if (n >= INJECT_MAX_CHORDS) { cmd->kind = INJ_ERROR; return; }
+            if (!parse_chord(tok, &cmd->chords[n].modifier, &cmd->chords[n].keycode, false)) {
+                cmd->kind = INJ_ERROR;
+                return;
+            }
+            n++;
+        }
+        if (n == 0) { cmd->kind = INJ_ERROR; return; }
+        cmd->nchords = n;
+        cmd->kind    = INJ_SHORTCUT;
+        return;
+    }
+
+    /* key / key_down / key_up: a single chord (remote-hid keyboard_key). */
+    if (name_eq(verb, "key")
         || name_eq(verb, "key_down") || name_eq(verb, "down")
         || name_eq(verb, "key_up") || name_eq(verb, "up")) {
         char tok[24];
@@ -285,33 +356,83 @@ void inject_parse_line(const char *line, inject_cmd_t *cmd) {
         rest = next_token(rest, a, sizeof(a));
         next_token(rest, b, sizeof(b));
         long x, y;
-        if (parse_int(a, &x) && parse_int(b, &y)) {
+        bool abs = name_eq(verb, "moveto");
+        long lo = abs ? 0 : INJECT_COORD_MIN;
+        long hi = abs ? INJECT_ABS_MAX : INJECT_COORD_MAX;
+        if (parse_int(a, &x) && parse_int(b, &y) &&
+            x >= lo && x <= hi && y >= lo && y <= hi) {
             cmd->x = (int16_t)x;
             cmd->y = (int16_t)y;
-            cmd->kind = name_eq(verb, "moveto") ? INJ_MOVETO : INJ_MOVE;
+            cmd->kind = abs ? INJ_MOVETO : INJ_MOVE;
         } else {
             cmd->kind = INJ_ERROR;
         }
         return;
     }
 
+    /* click [button] [count] [modifiers] (remote-hid mouse_click). */
     if (name_eq(verb, "click")) {
-        char tok[12];
-        next_token(rest, tok, sizeof(tok));
-        if (tok[0] == '\0' || name_eq(tok, "left"))   cmd->buttons = INJECT_BTN_LEFT;
-        else if (name_eq(tok, "right"))               cmd->buttons = INJECT_BTN_RIGHT;
-        else if (name_eq(tok, "middle"))              cmd->buttons = INJECT_BTN_MIDDLE;
-        else { cmd->kind = INJ_ERROR; return; }
-        cmd->kind = INJ_CLICK;
+        cmd->buttons = INJECT_BTN_LEFT;
+        cmd->count   = 1;
+        if (!parse_mouse_opts(rest, &cmd->buttons, &cmd->count, &cmd->modifier, true))
+            cmd->kind = INJ_ERROR;
+        else
+            cmd->kind = INJ_CLICK;
         return;
     }
 
-    if (name_eq(verb, "scroll")) {
+    /* mouse_down / mouse_up [button] (remote-hid mouse_down/mouse_up). */
+    if (name_eq(verb, "mouse_down") || name_eq(verb, "mdown")
+        || name_eq(verb, "mouse_up") || name_eq(verb, "mup")) {
         char tok[12];
         next_token(rest, tok, sizeof(tok));
+        cmd->buttons = INJECT_BTN_LEFT;
+        if (tok[0] != '\0' && !parse_button(tok, &cmd->buttons)) {
+            cmd->kind = INJ_ERROR;
+            return;
+        }
+        cmd->kind = (name_eq(verb, "mouse_down") || name_eq(verb, "mdown"))
+                        ? INJ_MOUSE_DOWN : INJ_MOUSE_UP;
+        return;
+    }
+
+    /* drag <dx> <dy> [button] [modifiers] (remote-hid mouse_drag). */
+    if (name_eq(verb, "drag")) {
+        char a[12], b[12];
+        rest = next_token(rest, a, sizeof(a));
+        rest = next_token(rest, b, sizeof(b));
+        long x, y;
+        if (!parse_int(a, &x) || !parse_int(b, &y) ||
+            x < INJECT_COORD_MIN || x > INJECT_COORD_MAX ||
+            y < INJECT_COORD_MIN || y > INJECT_COORD_MAX) {
+            cmd->kind = INJ_ERROR;
+            return;
+        }
+        cmd->x       = (int16_t)x;
+        cmd->y       = (int16_t)y;
+        cmd->buttons = INJECT_BTN_LEFT;
+        if (!parse_mouse_opts(rest, &cmd->buttons, NULL, &cmd->modifier, false))
+            cmd->kind = INJ_ERROR;
+        else
+            cmd->kind = INJ_DRAG;
+        return;
+    }
+
+    /* scroll <amount> [modifiers] (remote-hid mouse_scroll). */
+    if (name_eq(verb, "scroll")) {
+        char tok[12];
+        rest = next_token(rest, tok, sizeof(tok));
         long n;
-        if (parse_int(tok, &n)) { cmd->y = (int16_t)n; cmd->kind = INJ_SCROLL; }
-        else cmd->kind = INJ_ERROR;
+        if (!parse_int(tok, &n) || n < -INJECT_SCROLL_MAX || n > INJECT_SCROLL_MAX) {
+            cmd->kind = INJ_ERROR;
+            return;
+        }
+        cmd->y = (int16_t)n;
+        uint8_t dummy_btn = 0, dummy_cnt = 0;
+        if (!parse_mouse_opts(rest, &dummy_btn, &dummy_cnt, &cmd->modifier, false) || dummy_btn != 0)
+            cmd->kind = INJ_ERROR;
+        else
+            cmd->kind = INJ_SCROLL;
         return;
     }
 

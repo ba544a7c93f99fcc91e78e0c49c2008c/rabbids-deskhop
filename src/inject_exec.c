@@ -31,7 +31,11 @@
 #define INJECT_LINEBUF 128   /* max command line length */
 #define INTER_STEP_US  4000  /* spacing between emitted HID reports (~250/s) */
 
-#define INJ_MOD_SHIFT 0x02
+/* Worst-case low-level steps any single command line can expand into: a `type`
+   taps each character (press+release). No line may need more, so if this many
+   slots are free the whole line fits and expansion is never truncated mid-way
+   (which could leave a key/modifier pressed but never released). */
+#define INJECT_MAX_STEPS_PER_LINE (2 * (INJECT_MAX_TEXT - 1))
 
 typedef struct {
     uint8_t kind;
@@ -51,10 +55,12 @@ static uint8_t  cur_target = INJECT_TARGET_REMOTE;
 static char     linebuf[INJECT_LINEBUF];
 static uint16_t linelen;
 
-/* Keyboard keys/modifiers currently held across sequence steps (expansion-time
-   baseline). Emitted reports are absolute, so the host state follows this. */
+/* Keyboard keys/modifiers and mouse buttons currently held across sequence
+   steps (expansion-time baseline). Emitted reports are absolute, so the host
+   state follows this. */
 static uint8_t held_mod;
 static uint8_t held_keys[6];
+static uint8_t held_btn;
 
 static bool ring_push(const inject_step_t *s) {
     uint16_t next = (uint16_t)((ring_head + 1) % INJECT_RING);
@@ -63,6 +69,11 @@ static bool ring_push(const inject_step_t *s) {
     ring[ring_head] = *s;
     ring_head = next;
     return true;
+}
+
+/* Number of free slots in the ring (capacity is INJECT_RING - 1). */
+static uint16_t ring_free(void) {
+    return (uint16_t)((ring_tail - ring_head - 1 + INJECT_RING) % INJECT_RING);
 }
 
 static bool ring_pop(inject_step_t *s) {
@@ -127,6 +138,17 @@ static void push_delay(uint32_t ms) {
     ring_push(&s);
 }
 
+/* Momentarily press extra modifiers on top of the held keyboard baseline
+   (for a click/scroll/drag with modifiers held), returning to baseline. */
+static void mods_press(uint8_t mods) {
+    if (mods)
+        emit_kbd(held_mod | mods, held_keys);
+}
+static void mods_release(uint8_t mods) {
+    if (mods)
+        emit_kbd(held_mod, held_keys);
+}
+
 /* Expand a parsed command into low-level steps. Returns false on a parse error. */
 static bool inject_exec_cmd(const inject_cmd_t *c) {
     switch (c->kind) {
@@ -136,12 +158,17 @@ static bool inject_exec_cmd(const inject_cmd_t *c) {
                 bool shift;
                 if (!inject_ascii_to_hid(*p, &kc, &shift))
                     continue; /* silently skip characters with no US-layout key */
-                tap_chord(shift ? INJ_MOD_SHIFT : 0, kc);
+                tap_chord(shift ? INJECT_MOD_SHIFT : 0, kc);
             }
             return true;
 
         case INJ_KEY:
             tap_chord(c->modifier, c->keycode);
+            return true;
+
+        case INJ_SHORTCUT:
+            for (uint8_t i = 0; i < c->nchords; i++)
+                tap_chord(c->chords[i].modifier, c->chords[i].keycode);
             return true;
 
         case INJ_KEY_DOWN:
@@ -158,26 +185,54 @@ static bool inject_exec_cmd(const inject_cmd_t *c) {
 
         case INJ_RELEASE_ALL:
             held_mod = 0;
+            held_btn = 0;
             memset(held_keys, 0, sizeof(held_keys));
             emit_kbd(0, held_keys);                 /* release all keys */
             push_mouse(RELATIVE, 0, 0, 0, 0);       /* release all mouse buttons */
             return true;
 
         case INJ_MOVE:
-            push_mouse(RELATIVE, 0, c->x, c->y, 0);
+            /* Keep any held button down so a mouse_down + move composes a drag. */
+            push_mouse(RELATIVE, held_btn, c->x, c->y, 0);
             return true;
 
         case INJ_MOVETO:
-            push_mouse(ABSOLUTE, 0, c->x, c->y, 0);
+            push_mouse(ABSOLUTE, held_btn, c->x, c->y, 0);
             return true;
 
-        case INJ_CLICK:
-            push_mouse(RELATIVE, c->buttons, 0, 0, 0);
-            push_mouse(RELATIVE, 0, 0, 0, 0); /* release */
+        case INJ_CLICK: {
+            uint8_t n = c->count ? c->count : 1;
+            mods_press(c->modifier);
+            for (uint8_t i = 0; i < n; i++) {
+                push_mouse(RELATIVE, held_btn | c->buttons, 0, 0, 0); /* press */
+                push_mouse(RELATIVE, held_btn, 0, 0, 0);              /* release */
+            }
+            mods_release(c->modifier);
+            return true;
+        }
+
+        case INJ_MOUSE_DOWN:
+            held_btn |= c->buttons;
+            push_mouse(RELATIVE, held_btn, 0, 0, 0);
+            return true;
+
+        case INJ_MOUSE_UP:
+            held_btn &= (uint8_t)~c->buttons;
+            push_mouse(RELATIVE, held_btn, 0, 0, 0);
+            return true;
+
+        case INJ_DRAG:
+            mods_press(c->modifier);
+            push_mouse(RELATIVE, held_btn | c->buttons, 0, 0, 0);       /* button down */
+            push_mouse(RELATIVE, held_btn | c->buttons, c->x, c->y, 0); /* move held */
+            push_mouse(RELATIVE, held_btn, 0, 0, 0);                    /* button up */
+            mods_release(c->modifier);
             return true;
 
         case INJ_SCROLL:
-            push_mouse(RELATIVE, 0, 0, 0, (int8_t)c->y);
+            mods_press(c->modifier);
+            push_mouse(RELATIVE, held_btn, 0, 0, (int8_t)c->y);
+            mods_release(c->modifier);
             return true;
 
         case INJ_DELAY:
@@ -204,7 +259,18 @@ static void inject_handle_line(uint8_t itf) {
     inject_cmd_t cmd;
     inject_parse_line(linebuf, &cmd);
 
-    bool ok = inject_exec_cmd(&cmd);
+    /* Admit a command only when the whole line is guaranteed to fit, so a chord
+       can never be queued with its release dropped on overflow (stuck key). If
+       the queue is backed up, refuse the line ("err") instead of truncating it;
+       the operator retries once the backlog drains. */
+    bool ok;
+    if (cmd.kind == INJ_ERROR) {
+        ok = false;
+    } else if (ring_free() < INJECT_MAX_STEPS_PER_LINE) {
+        ok = false; /* backpressure: queue too full to admit atomically */
+    } else {
+        ok = inject_exec_cmd(&cmd);
+    }
 
     const char *reply = ok ? "ok\r\n" : "err\r\n";
     tud_cdc_n_write_str(itf, reply);
@@ -215,18 +281,28 @@ static void inject_handle_line(uint8_t itf) {
 
 /* TinyUSB callback: new bytes arrived on the CDC interface. */
 void tud_cdc_rx_cb(uint8_t itf) {
+    static bool line_overflow; /* true once a line exceeded the buffer */
     uint8_t buf[64];
     uint32_t count = tud_cdc_n_read(itf, buf, sizeof(buf));
 
     for (uint32_t i = 0; i < count; i++) {
         char ch = (char)buf[i];
         if (ch == '\n' || ch == '\r') {
-            if (linelen > 0)
+            if (line_overflow) {
+                /* The whole overlong line is dropped, not parsed as fragments. */
+                tud_cdc_n_write_str(itf, "err\r\n");
+                tud_cdc_n_write_flush(itf);
+                line_overflow = false;
+                linelen = 0;
+            } else if (linelen > 0) {
                 inject_handle_line(itf);
+            }
+        } else if (line_overflow) {
+            /* Keep discarding until the newline that closes the overlong line. */
         } else if (linelen < INJECT_LINEBUF - 1) {
             linebuf[linelen++] = ch;
         } else {
-            linelen = 0; /* overlong line: discard to resync */
+            line_overflow = true; /* overlong: discard the rest of this line */
         }
     }
 }

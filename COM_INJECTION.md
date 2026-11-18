@@ -52,37 +52,53 @@ printf 'target remote\n type hello\n key enter\n' > /dev/ttyACM0
 
 ## 3. Vocabulaire des commandes (steps)
 
-| Commande | Effet |
-|---|---|
-| `type <texte>` | Tape le texte littéral (ASCII, layout US) |
-| `key <chord>` | Tape un accord : presse puis relâche. Ex. `key enter`, `key ctrl+alt+del` |
-| `key_down <chord>` (`down`) | **Presse et maintient** (modificateur seul autorisé : `down ctrl`) |
-| `key_up <chord>` (`up`) | Relâche l'accord indiqué |
-| `release_all` (`release`) | Relâche toutes les touches et boutons |
-| `move <dx> <dy>` | Déplacement souris **relatif** |
-| `moveto <x> <y>` | Déplacement souris **absolu** (0..32767) |
-| `click [left\|right\|middle]` | Clic (défaut : gauche) |
-| `scroll <n>` | Molette (n signé) |
-| `delay <ms>` (`sleep`) | Attend n millisecondes |
-| `target <local\|remote>` | Où injecter : `local` = PC du contrôleur, `remote` = l'autre PC (défaut **remote**) |
-| `# ...` | Commentaire (ignoré) |
+Le vocabulaire et les **options combinables** sont calqués sur les outils de
+`remote-hid` (`keyboard_key`, `keyboard_shortcut`, `mouse_click`, `mouse_drag`,
+`mouse_down`/`mouse_up`…), adaptés à une syntaxe en ligne.
 
-`shortcut` est un alias de `key`. Les maintiens (`key_down`/`key_up`) persistent
-**à travers** les steps suivants (p. ex. tenir `ctrl` pendant un `move`), d'où
-l'importance de terminer par `release_all`.
+| Commande | remote-hid | Effet |
+|---|---|---|
+| `type <texte>` | `keyboard_type` | Tape le texte littéral (ASCII, layout US) |
+| `key <chord>` | `keyboard_key` | Tape **un** accord : presse puis relâche. Ex. `key enter`, `key ctrl+alt+del` |
+| `shortcut <chord> [chord…]` | `keyboard_shortcut` | Tape **une suite** d'accords dans l'ordre. Ex. `shortcut ctrl+k ctrl+s` |
+| `key_down <chord>` (`down`) | `key_down` | **Presse et maintient** (modificateur seul autorisé : `down ctrl`) |
+| `key_up <chord>` (`up`) | `key_up` | Relâche l'accord indiqué |
+| `release_all` (`release`) | `release_all` | Relâche toutes les touches **et boutons souris** |
+| `move <dx> <dy>` | `mouse_move` | Déplacement souris **relatif** (déplace un bouton maintenu → glisser) |
+| `moveto <x> <y>` | — | Déplacement souris **absolu** (0..32767) |
+| `click [button] [count] [mods]` | `mouse_click` | Clic ; `count` = répétitions (1..9), `mods` tenus pendant le clic. Ex. `click left 2`, `click right ctrl+shift` |
+| `mouse_down [button]` (`mdown`) | `mouse_down` | **Presse et maintient** un bouton souris |
+| `mouse_up [button]` (`mup`) | `mouse_up` | Relâche un bouton souris maintenu |
+| `drag <dx> <dy> [button] [mods]` | `mouse_drag` | Presse le bouton, déplace en **relatif**, relâche. Ex. `drag 120 0 left` |
+| `scroll <n> [mods]` | `mouse_scroll` | Molette (n signé) ; `mods` tenus (p. ex. `scroll -3 ctrl` pour zoomer) |
+| `delay <ms>` (`sleep`) | wait step | Attend n millisecondes |
+| `target <local\|remote>` | — | Où injecter : `local` = PC du contrôleur, `remote` = l'autre PC (défaut **remote**) |
+| `# ...` | — | Commentaire (ignoré) |
+
+**Boutons** : `left` (défaut), `right`, `middle`.
+**Modificateurs** : `ctrl`/`primary`, `shift`, `alt`, `gui`/`win`/`cmd`/`super`,
+combinables par `+` (`ctrl+shift`). `primary` = Ctrl ici (cibles PC ;
+contrairement à `remote-hid` il n'y a pas de détection d'OS côté carte).
+
+Les tokens de `click`/`drag` (bouton, count, modificateurs) sont acceptés **dans
+n'importe quel ordre**. Les maintiens (`key_down`/`key_up`, `mouse_down`/`mouse_up`)
+persistent **à travers** les steps suivants — p. ex. `mouse_down` puis plusieurs
+`move` compose un glisser manuel — d'où l'importance de terminer par `release_all`.
 
 ### Exemple de séquence
 
 ```
 target remote
+shortcut ctrl+k ctrl+s      # raccourci multi-accords (style VS Code)
 key_down ctrl
-key a
+click left 2                # double-clic ctrl maintenu
 key_up ctrl
 type echo controlled from A
 key enter
 delay 500
 moveto 16000 12000
-click
+drag 120 0 left             # glisser 120px vers la droite, bouton gauche
+scroll -3 ctrl              # zoom arrière
 release_all
 ```
 
@@ -106,10 +122,21 @@ release_all
 - **Layout US** pour `type` (les caractères sans touche US sont ignorés).
   Comme `remote-hid`, un vrai support multi-layout serait une évolution.
 - Les **maintiens** non relâchés restent actifs : terminer par `release_all`.
-- Pas encore de **drag** (bouton souris maintenu pendant un déplacement) ni de
-  `path` ; prévus en évolution, alignés sur le vocabulaire `remote-hid`.
-- L'injection partage l'état clavier avec la frappe réelle : éviter d'injecter
-  pendant que le vrai clavier contrôle la même cible.
+- **Pas d'humanisation** : DeskHop est un injecteur transparent, donc les options
+  `remote-hid` de rythme/courbe (`precise`, `humanize`, `speed`, `mode`, `typos`)
+  n'ont pas d'équivalent — tout est émis « précis » à cadence fixe (~250 rapports/s).
+- Pas de `mouse_path` (liste de points lissée) : approximable par des `move`
+  successifs. Évolution possible, alignée sur `remote-hid`.
+- L'injection partage l'état clavier/souris avec la frappe réelle : éviter
+  d'injecter pendant que le vrai clavier/souris contrôle la même cible.
+- Les rapports émis sont **absolus** (état complet). Conséquence : `type`/`key`
+  d'une touche déjà **maintenue** par un `key_down` ne génère pas de nouvelle
+  frappe (l'état ne change pas). Relâcher d'abord (`key_up`/`release_all`).
+- Une ligne trop longue, ou une ligne reçue alors que la file est saturée, est
+  **refusée** (`err`) plutôt que tronquée (aucune touche ne reste coincée) ; la
+  retaper une fois la file vidée. Longueur max d'un `type` : 47 caractères.
+- Coordonnées validées : `move`/`drag` ±32767, `moveto` 0..32767, `scroll`
+  ±127 (hors plage → `err`, jamais de débordement/inversion).
 
 ## 6. Fichiers
 
