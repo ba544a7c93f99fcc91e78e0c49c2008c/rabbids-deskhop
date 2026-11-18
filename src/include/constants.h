@@ -18,6 +18,11 @@
 #define OUTPUT_A 0
 #define OUTPUT_B 1
 
+/* Presence bits exchanged in the heartbeat (device_t.peer_present_flags). */
+#define PRESENCE_PC    0x01
+#define PRESENCE_KBD   0x02
+#define PRESENCE_MOUSE 0x04
+
 /*==============================================================================
  *  HID Interface Numbers
  *==============================================================================*/

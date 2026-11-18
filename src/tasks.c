@@ -159,6 +159,12 @@ void heartbeat_output_task(device_t *state) {
         reset_usb_boot(1 << PICO_DEFAULT_LED_PIN, 0);
 #endif
 
+    /* Advertise this board's presence (its PC + locally attached HID) so the
+       other board can report both outputs. Packed into an otherwise-unused byte. */
+    uint8_t presence = (state->tud_connected      ? PRESENCE_PC    : 0)
+                     | (state->keyboard_connected ? PRESENCE_KBD   : 0)
+                     | (state->mouse_connected    ? PRESENCE_MOUSE : 0);
+
     uart_packet_t packet = {
         .type = HEARTBEAT_MSG,
         .data16 = {
@@ -166,6 +172,7 @@ void heartbeat_output_task(device_t *state) {
             [2] = state->active_output,
         },
     };
+    packet.data[6] = presence;
 
     queue_try_add(&global_state.uart_tx_queue, &packet);
 }

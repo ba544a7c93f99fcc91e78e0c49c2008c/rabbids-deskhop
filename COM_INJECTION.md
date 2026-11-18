@@ -119,10 +119,38 @@ rien et répondent toujours en local (même file pleine).
 > ~250 rapports/s. Pour savoir quand c'est terminé, *poll* `/status` jusqu'à
 > `queued=0`. `dropped` qui augmente = file saturée (ralentir) ou ligne trop longue.
 
+| `/log on` / `/log off` | (Dé)abonne le **flux d'événements** (ci-dessous). Off par défaut |
+
 ```
 /status
-status target=remote queued=12 held_mod=0x01 held_keys=0 held_btn=0x01 dropped=0
+status target=remote queued=12 held_mod=0x01 held_keys=0 held_btn=0x01 dropped=0 \
+       log=on board=a output=a pc_a=up pc_b=up kbd=up mouse=up link=up
 ```
+
+Champs de présence de `/status` :
+- `board` : rôle de la carte contrôleur (a/b) ; `output` : sortie active (clavier/souris physiques).
+- `pc_a` / `pc_b` : `up`/`down` = PC présent sur ce port ; `?` = port de l'**autre** carte alors que le lien est coupé (inconnu).
+- `kbd` / `mouse` : un clavier/une souris est branché **en entrée** (sur l'une ou l'autre carte).
+- `link` : heartbeat de l'autre carte frais (`up`) ou non (`down`).
+
+### Flux d'événements (`/log on`)
+
+Lignes `evt ...` **asynchrones** (préfixe `evt`, à dispatcher à part de `ok`/`err`).
+`/log on` renvoie d'abord un instantané complet, puis une ligne à chaque changement :
+
+```
+evt switch output=a        # le clavier/souris physique bascule vers A (ou B)
+evt pc port=b state=up     # un PC vient d'apparaître / disparaître sur un port
+evt kbd state=down         # clavier débranché de l'entrée
+evt mouse state=up
+evt link state=down        # on a perdu le heartbeat de l'autre carte
+```
+
+> **Présence des deux ports.** Chaque carte connaît directement **son** côté (son
+> PC + le clavier/souris branchés sur elle) et apprend l'autre côté via le
+> **heartbeat (1 Hz)** étendu. Donc : détection d'un (dé)branchage en ~1 s ;
+> quand `link=down`, le port d'en face est `?` (inconnu). Les deux cartes doivent
+> tourner cette version du firmware (sinon le port d'en face reste vu `down`).
 
 ## 4. Fonctionnement technique
 

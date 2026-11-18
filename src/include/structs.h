@@ -168,6 +168,11 @@ typedef struct {
     bool keyboard_connected; // True when our keyboard is connected locally
     bool mouse_connected;    // True when our mouse is connected locally
 
+    /* Presence of the OTHER board, learned from its heartbeat (1 Hz). Lets a
+       board report both outputs' PC/keyboard/mouse presence, not just its own. */
+    uint8_t  peer_present_flags; // bit0 = its PC up, bit1 = keyboard, bit2 = mouse
+    uint64_t peer_last_seen;     // time_us_64() of the last heartbeat received
+
     /* Leader-key output switching (anti-phantom). Pure state machine in leader.c:
        tap(s) of the leader key are withheld from the PC, a selector then switches. */
     leader_state_t leader;

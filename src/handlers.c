@@ -391,6 +391,11 @@ void handle_response_byte_msg(uart_packet_t *packet, device_t *state) {
 void handle_heartbeat_msg(uart_packet_t *packet, device_t *state) {
     uint16_t other_running_version = packet->data16[0];
 
+    /* Record the other board's presence/liveness first, before any early return
+       below, so status reporting stays accurate even during a firmware upgrade. */
+    state->peer_present_flags = packet->data[6];
+    state->peer_last_seen     = time_us_64();
+
     /* Compile-time kill-switch: never kick off a cross-device firmware copy */
     if (DISABLE_FW_UPGRADE)
         return;

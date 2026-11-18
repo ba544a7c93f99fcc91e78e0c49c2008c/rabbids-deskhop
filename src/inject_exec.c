@@ -30,6 +30,39 @@
 static uint32_t dropped_lines;
 
 #define INJECT_PROTO_VERSION 1
+#define INJECT_CDC_ITF       0        /* the single CDC/COM interface */
+#define PEER_LINK_TIMEOUT_US 3000000ULL /* heartbeats are 1 Hz; 3 missed = link down */
+
+/* Event stream (opt-in via /log on): asynchronous "evt ..." lines telling the
+   controlling PC about physical switches and PC/keyboard/mouse presence. Off by
+   default so the port stays strict request/response unless the client asks. */
+static bool   log_enabled;
+static int8_t log_last_output = -1; /* -1 = unknown: forces a snapshot on enable */
+static int8_t log_last_pc_a = -1, log_last_pc_b = -1;
+static int8_t log_last_kbd = -1, log_last_mouse = -1;
+static int8_t log_last_link = -1;
+
+static bool peer_link_up(void) {
+    return (time_us_64() - global_state.peer_last_seen) < PEER_LINK_TIMEOUT_US;
+}
+
+/* PC present on a given output: our own side is known directly, the other side
+   from the peer heartbeat (only trustworthy while the link is up). */
+static bool port_pc_up(uint8_t port) {
+    if (port == global_state.board_role)
+        return global_state.tud_connected;
+    return peer_link_up() && (global_state.peer_present_flags & PRESENCE_PC);
+}
+
+/* A keyboard / mouse is "at the input" if either board hosts one. */
+static bool any_kbd(void) {
+    return global_state.keyboard_connected
+        || (peer_link_up() && (global_state.peer_present_flags & PRESENCE_KBD));
+}
+static bool any_mouse(void) {
+    return global_state.mouse_connected
+        || (peer_link_up() && (global_state.peer_present_flags & PRESENCE_MOUSE));
+}
 
 #define STEP_KBD   0
 #define STEP_MOUSE 1
@@ -301,7 +334,9 @@ static void meta_help(uint8_t itf) {
         "  delay <ms>                     wait milliseconds\r\n"
         "  target <local|remote>          where to inject (default remote)\r\n"
         "button: left|right|middle   mods: ctrl(primary) shift alt gui(win|cmd), joined with +\r\n"
-        "control: /help /contract /status /version   ('ok' = queued, poll /status for drain)\r\n");
+        "control: /help /contract /status /version /log on|off\r\n"
+        "  'ok' = queued (poll /status for drain). /log on streams events:\r\n"
+        "  evt switch output=a|b | evt pc port=a|b state=up|down | evt kbd|mouse|link state=..\r\n");
 }
 
 /* Compact, machine-parsable grammar: a count line, then one line per verb. */
@@ -325,19 +360,35 @@ static void meta_contract(uint8_t itf) {
         "target local|remote\r\n");
 }
 
-/* One-line live snapshot of the injector state. */
+/* "up"/"down" for our own port, "?" for the peer port when its link is down. */
+static const char *pc_token(uint8_t port) {
+    if (port == global_state.board_role)
+        return global_state.tud_connected ? "up" : "down";
+    if (!peer_link_up())
+        return "?";
+    return (global_state.peer_present_flags & PRESENCE_PC) ? "up" : "down";
+}
+
+/* One-line live snapshot of the injector + KVM presence state. */
 static void meta_status(uint8_t itf) {
     uint8_t nkeys = 0;
     for (int i = 0; i < 6; i++)
         if (held_keys[i])
             nkeys++;
 
-    char line[128];
+    char line[224];
     snprintf(line, sizeof(line),
-             "status target=%s queued=%u held_mod=0x%02X held_keys=%u held_btn=0x%02X dropped=%lu\r\n",
+             "status target=%s queued=%u held_mod=0x%02X held_keys=%u held_btn=0x%02X "
+             "dropped=%lu log=%s board=%c output=%c pc_a=%s pc_b=%s kbd=%s mouse=%s link=%s\r\n",
              cur_target == INJECT_TARGET_REMOTE ? "remote" : "local",
              (unsigned)ring_count(), (unsigned)held_mod, (unsigned)nkeys,
-             (unsigned)held_btn, (unsigned long)dropped_lines);
+             (unsigned)held_btn, (unsigned long)dropped_lines,
+             log_enabled ? "on" : "off",
+             global_state.board_role == OUTPUT_A ? 'a' : 'b',
+             global_state.active_output == OUTPUT_A ? 'a' : 'b',
+             pc_token(OUTPUT_A), pc_token(OUTPUT_B),
+             any_kbd() ? "up" : "down", any_mouse() ? "up" : "down",
+             peer_link_up() ? "up" : "down");
     tud_cdc_n_write_str(itf, line);
 }
 
@@ -354,6 +405,23 @@ static bool inject_meta(uint8_t itf, const char *line) {
         meta_contract(itf);
     } else if (meta_eq(c, "status")) {
         meta_status(itf);
+    } else if (meta_eq(c, "log")) {
+        /* /log on|off : subscribe to / silence the async event stream. */
+        const char *arg = c + 3; /* past "log" */
+        while (*arg == ' ' || *arg == '\t')
+            arg++;
+        if (meta_eq(arg, "on")) {
+            log_enabled = true;
+            /* Force a full snapshot on the next task tick. */
+            log_last_output = log_last_pc_a = log_last_pc_b = -1;
+            log_last_kbd = log_last_mouse = log_last_link = -1;
+            tud_cdc_n_write_str(itf, "ok\r\n");
+        } else if (meta_eq(arg, "off")) {
+            log_enabled = false;
+            tud_cdc_n_write_str(itf, "ok\r\n");
+        } else {
+            tud_cdc_n_write_str(itf, "err usage: /log on|off\r\n");
+        }
     } else if (meta_eq(c, "version")) {
         char line2[48];
         snprintf(line2, sizeof(line2), "DeskHop-inject %d\r\n", INJECT_PROTO_VERSION);
@@ -433,8 +501,59 @@ void tud_cdc_rx_cb(uint8_t itf) {
     }
 }
 
+/* Emit a single-line event to the control port. */
+static void evt_emit(const char *line) {
+    tud_cdc_n_write_str(INJECT_CDC_ITF, line);
+    tud_cdc_n_write_flush(INJECT_CDC_ITF);
+}
+
+/* When logging is on, emit an event for each change in the physical switch and
+   in PC / keyboard / mouse presence. Caches the last reported value so only
+   transitions are sent; a fresh /log on resets the cache and re-sends a full
+   snapshot. Cheap enough to run every tick. */
+static void inject_log_task(void) {
+    if (!log_enabled || !tud_cdc_n_connected(INJECT_CDC_ITF))
+        return;
+
+    if ((int8_t)global_state.active_output != log_last_output) {
+        log_last_output = (int8_t)global_state.active_output;
+        evt_emit(log_last_output == OUTPUT_A ? "evt switch output=a\r\n"
+                                             : "evt switch output=b\r\n");
+    }
+
+    int8_t link = peer_link_up() ? 1 : 0;
+    if (link != log_last_link) {
+        log_last_link = link;
+        evt_emit(link ? "evt link state=up\r\n" : "evt link state=down\r\n");
+    }
+
+    int8_t a = port_pc_up(OUTPUT_A) ? 1 : 0;
+    if (a != log_last_pc_a) {
+        log_last_pc_a = a;
+        evt_emit(a ? "evt pc port=a state=up\r\n" : "evt pc port=a state=down\r\n");
+    }
+    int8_t b = port_pc_up(OUTPUT_B) ? 1 : 0;
+    if (b != log_last_pc_b) {
+        log_last_pc_b = b;
+        evt_emit(b ? "evt pc port=b state=up\r\n" : "evt pc port=b state=down\r\n");
+    }
+
+    int8_t k = any_kbd() ? 1 : 0;
+    if (k != log_last_kbd) {
+        log_last_kbd = k;
+        evt_emit(k ? "evt kbd state=up\r\n" : "evt kbd state=down\r\n");
+    }
+    int8_t m = any_mouse() ? 1 : 0;
+    if (m != log_last_mouse) {
+        log_last_mouse = m;
+        evt_emit(m ? "evt mouse state=up\r\n" : "evt mouse state=down\r\n");
+    }
+}
+
 /* Scheduler task: emit queued steps, honoring inter-step spacing and delays. */
 void inject_task(device_t *state) {
+    inject_log_task(); /* presence/switch events are not rate-limited by the step gate */
+
     if (time_us_64() < inject_gate_us)
         return;
 
