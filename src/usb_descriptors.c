@@ -59,8 +59,11 @@ uint8_t const *tud_descriptor_device_cb(void) {
         desc_device_dynamic.idVendor  = clone->vid;
         desc_device_dynamic.idProduct = clone->pid;
         desc_device_dynamic.bcdDevice = clone->bcd;
-        /* Mirror the keyboard exactly: if it has no serial, advertise none (index 0)
-           instead of the per-board chip ID, so outputs A and B stay identical. */
+        /* Mirror the keyboard exactly: for any string it doesn't provide, advertise
+           no string (index 0) rather than falling back to the per-board build
+           string, so outputs A and B stay byte-for-byte identical. */
+        desc_device_dynamic.iManufacturer = clone->manufacturer[0] ? 0x01 : 0x00;
+        desc_device_dynamic.iProduct      = clone->product[0] ? 0x02 : 0x00;
         desc_device_dynamic.iSerialNumber = clone->serial[0] ? 0x03 : 0x00;
         return (uint8_t const *)&desc_device_dynamic;
     }

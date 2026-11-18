@@ -50,18 +50,22 @@ clavier ──┤ 1. capture identité (VID/PID/chaînes)                    │
 - À la connexion d'un clavier, `tuh_hid_mount_cb()` (`src/usb.c`) appelle
   `identity_request_capture()`, qui pose simplement un drapeau
   (`state->identity_capture_addr`). **Rien de bloquant** dans le callback.
-- La tâche `identity_capture_task()` (`src/identity.c`, cadencée à 20 Hz sur
-  core1) effectue ensuite les lectures de descripteurs, qui sont **bloquantes** :
-  - `tuh_vid_pid_get()` → VID / PID ;
-  - `tuh_descriptor_get_device_sync()` → `bcdDevice` ;
-  - `tuh_descriptor_get_manufacturer_string_sync()` / `..._product_..._sync()` /
-    `..._serial_..._sync()` → chaînes, converties d'UTF-16LE en ASCII par
-    `utf16_desc_to_ascii()`.
-- Le résultat remplit une structure `usb_identity_t` (voir §4), marquée
-  `magic = USB_IDENTITY_MAGIC` et `valid = 1`.
+- La tâche `identity_capture_task()` (`src/identity.c`, core1) effectue les
+  lectures de descripteurs en **asynchrone** (API non bloquante de TinyUSB),
+  pilotées par une petite machine à états (`CAP_DEVICE → CAP_MFR → CAP_PROD →
+  CAP_SER`) dont les callbacks de complétion enchaînent les lectures :
+  - `tuh_vid_pid_get()` → VID / PID (sans transfert) ;
+  - `tuh_descriptor_get_device()` → `bcdDevice` ;
+  - `tuh_descriptor_get_{manufacturer,product,serial}_string()` → chaînes,
+    converties d'UTF-16LE en ASCII par `utf16_desc_to_ascii()`.
+- Quand tout est lu, la machine passe à `CAP_DONE` ; la **finalisation**
+  (`capture_finish` : `apply_identity` + sauvegarde flash + envoi UART) a lieu
+  dans le contexte de la tâche, **jamais** dans un callback USB.
 
-Ces lectures tiennent en quelques millisecondes sur un clavier normal, bien en
-dessous du watchdog (500 ms).
+**Pourquoi asynchrone ?** Ainsi core1 n'est jamais bloqué : un périphérique qui
+resterait branché sans répondre à un transfert de contrôle ne peut plus figer la
+boucle core1 ni déclencher le watchdog (500 ms). Les lectures bloquantes
+`*_sync` (sans timeout) ont été remplacées pour cette raison.
 
 ### 3.2 Application locale + persistance
 
@@ -182,9 +186,12 @@ périphérique réel lu depuis `/sys` sous Linux).
   qui lit une interface HID vendor spécifique (RGB, macros) ne la retrouvera pas,
   même avec le bon VID/PID.
 - **Course inter-cœurs** : `present_identity` est écrite par core1 et lue par
-  core0 pendant l'énumération. L'écriture précède l'armement de la
-  ré-énumération, donc la valeur est stable au moment où l'hôte relit les
-  descripteurs ; aucun verrou n'est ajouté (cohérent avec le reste du firmware).
+  core0 dans les callbacks de descripteurs. `apply_identity` publie en trois
+  temps avec barrières mémoire (`__sync_synchronize`) : `valid = 0` → copie du
+  contenu → `valid = 1`. Pendant la brève fenêtre de mise à jour,
+  `identity_to_present()` renvoie donc `NULL` et l'hôte obtient l'identité
+  statique (jamais un enregistrement à moitié écrit), au lieu d'un mélange
+  incohérent.
 
 ---
 

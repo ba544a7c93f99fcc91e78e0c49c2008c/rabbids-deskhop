@@ -34,19 +34,6 @@ static void utf16_desc_to_ascii(const uint16_t *desc, char *dst) {
     dst[out] = '\0';
 }
 
-/* Read one string descriptor by index into an identity field. Empty on failure. */
-static void read_string_field(uint8_t dev_addr,
-                              uint8_t (*getter)(uint8_t, uint16_t, void *, uint16_t),
-                              char *dst) {
-    uint16_t temp[64];
-    memset(temp, 0, sizeof(temp));
-    dst[0] = '\0';
-
-    uint8_t xfer_result = getter(dev_addr, IDENTITY_LANGID, temp, sizeof(temp));
-    if (xfer_result == XFER_RESULT_SUCCESS && (temp[0] & 0xFF) >= 2)
-        utf16_desc_to_ascii(temp, dst);
-}
-
 void identity_init(device_t *state) {
     if (state->config.clone_usb_identity && state->config.stored_identity.valid
         && state->config.stored_identity.magic == USB_IDENTITY_MAGIC) {
@@ -82,52 +69,138 @@ static void apply_identity(device_t *state, const usb_identity_t *id) {
     if (memcmp(&state->present_identity, id, sizeof(*id)) == 0)
         return;
 
-    state->present_identity        = *id;
-    state->config.stored_identity  = *id;
+    /* Publish safely for the other core, which reads present_identity in the USB
+       descriptor callbacks: invalidate, fill, then validate, with barriers, so a
+       concurrent GET_DESCRIPTOR never sees a half-written record (it falls back
+       to the static identity during the brief window instead). */
+    state->present_identity.valid = 0;
+    __sync_synchronize();
 
+    usb_identity_t tmp = *id;
+    tmp.valid = 0;
+    state->present_identity = tmp;
+    __sync_synchronize();
+    state->present_identity.valid = 1;
+    __sync_synchronize();
+
+    state->config.stored_identity = *id;
     save_config(state);
 
     state->identity_reenum_pending = true;
 }
 
-void identity_capture_task(device_t *state) {
-    uint8_t dev_addr = state->identity_capture_addr;
-    if (dev_addr == 0)
-        return;
+/* --- Asynchronous identity capture ------------------------------------------
+ * The descriptor reads are done with the non-blocking TinyUSB API and advanced
+ * from completion callbacks, so core1's loop is never stalled (a device that
+ * stops responding can no longer trip the watchdog). Flash is written only from
+ * the task context (capture_finish), never from a USB callback. A single capture
+ * runs at a time, driven on core1, so module-static state is safe. */
+enum { CAP_IDLE = 0, CAP_DEVICE, CAP_MFR, CAP_PROD, CAP_SER, CAP_DONE };
 
-    usb_identity_t id;
-    memset(&id, 0, sizeof(id));
+static volatile uint8_t cap_phase = CAP_IDLE;
+static uint8_t  cap_addr;
+static usb_identity_t cap_id;
+static uint16_t cap_buf[64]; /* holds the device descriptor or one string descriptor */
 
-    uint16_t vid = 0, pid = 0;
-    if (!tuh_vid_pid_get(dev_addr, &vid, &pid)) {
-        /* Device went away before we could read it; drop the request. */
-        state->identity_capture_addr = 0;
-        return;
+static void capture_cb(tuh_xfer_t *xfer);
+
+/* Kick the async read for a phase; on failure, hand off to the task to finalize. */
+static void capture_kick(uint8_t phase) {
+    cap_phase = phase;
+    bool started = false;
+
+    switch (phase) {
+        case CAP_MFR:
+            started = tuh_descriptor_get_manufacturer_string(cap_addr, IDENTITY_LANGID,
+                                                             cap_buf, sizeof(cap_buf), capture_cb, 0);
+            break;
+        case CAP_PROD:
+            started = tuh_descriptor_get_product_string(cap_addr, IDENTITY_LANGID,
+                                                        cap_buf, sizeof(cap_buf), capture_cb, 0);
+            break;
+        case CAP_SER:
+            started = tuh_descriptor_get_serial_string(cap_addr, IDENTITY_LANGID,
+                                                       cap_buf, sizeof(cap_buf), capture_cb, 0);
+            break;
     }
 
-    id.vid = vid;
-    id.pid = pid;
-    id.bcd = 0x0100;
+    if (!started)
+        cap_phase = CAP_DONE; /* finalize with whatever we have (task context) */
+}
 
-    /* bcdDevice lives in the device descriptor; best-effort read. */
-    tusb_desc_device_t desc;
-    if (tuh_descriptor_get_device_sync(dev_addr, &desc, sizeof(desc)) == XFER_RESULT_SUCCESS)
-        id.bcd = desc.bcdDevice;
+static void capture_cb(tuh_xfer_t *xfer) {
+    bool ok = (xfer->result == XFER_RESULT_SUCCESS);
 
-    read_string_field(dev_addr, tuh_descriptor_get_manufacturer_string_sync, id.manufacturer);
-    read_string_field(dev_addr, tuh_descriptor_get_product_string_sync, id.product);
-    read_string_field(dev_addr, tuh_descriptor_get_serial_string_sync, id.serial);
+    switch (cap_phase) {
+        case CAP_DEVICE:
+            if (ok)
+                cap_id.bcd = ((const tusb_desc_device_t *)cap_buf)->bcdDevice;
+            capture_kick(CAP_MFR);
+            break;
+        case CAP_MFR:
+            if (ok && (cap_buf[0] & 0xFF) >= 2)
+                utf16_desc_to_ascii(cap_buf, cap_id.manufacturer);
+            capture_kick(CAP_PROD);
+            break;
+        case CAP_PROD:
+            if (ok && (cap_buf[0] & 0xFF) >= 2)
+                utf16_desc_to_ascii(cap_buf, cap_id.product);
+            capture_kick(CAP_SER);
+            break;
+        case CAP_SER:
+            if (ok && (cap_buf[0] & 0xFF) >= 2)
+                utf16_desc_to_ascii(cap_buf, cap_id.serial);
+            cap_phase = CAP_DONE; /* let the task apply + persist off the USB callback */
+            break;
+        default:
+            break;
+    }
+}
 
-    id.magic = USB_IDENTITY_MAGIC;
-    id.valid = 1;
+static void capture_finish(device_t *state) {
+    cap_id.magic = USB_IDENTITY_MAGIC;
+    cap_id.valid = 1;
 
-    apply_identity(state, &id);
+    apply_identity(state, &cap_id);
 
     /* Share it with the other board so both outputs match. */
     state->identity_push_offset  = 0;
     state->identity_push_pending = true;
 
     state->identity_capture_addr = 0;
+    cap_phase = CAP_IDLE;
+}
+
+void identity_capture_task(device_t *state) {
+    if (state->identity_capture_addr == 0)
+        return;
+
+    /* A capture finished (in a callback): apply it here, in task context. */
+    if (cap_phase == CAP_DONE) {
+        capture_finish(state);
+        return;
+    }
+
+    /* A capture is already in flight (async): wait for it. */
+    if (cap_phase != CAP_IDLE)
+        return;
+
+    /* Start a new capture: VID/PID are available without a transfer. */
+    uint16_t vid = 0, pid = 0;
+    if (!tuh_vid_pid_get(state->identity_capture_addr, &vid, &pid)) {
+        state->identity_capture_addr = 0;
+        return;
+    }
+
+    memset(&cap_id, 0, sizeof(cap_id));
+    cap_id.vid = vid;
+    cap_id.pid = pid;
+    cap_id.bcd = 0x0100;
+    cap_addr   = state->identity_capture_addr;
+
+    cap_phase = CAP_DEVICE;
+    if (!tuh_descriptor_get_device(cap_addr, cap_buf, sizeof(tusb_desc_device_t), capture_cb, 0))
+        cap_phase = CAP_DONE; /* couldn't start; finalize with VID/PID next tick */
 }
 
 void identity_send_task(device_t *state) {
