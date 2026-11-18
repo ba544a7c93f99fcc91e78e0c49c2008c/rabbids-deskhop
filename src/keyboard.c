@@ -146,127 +146,43 @@ hotkey_combo_t *check_all_hotkeys(hid_keyboard_report_t *report, device_t *state
     return NULL;
 }
 
-/* True if the report holds no modifiers and no keys. */
-static bool report_is_empty(const hid_keyboard_report_t *report) {
-    if (report->modifier)
-        return false;
-
-    for (int i = 0; i < KEYS_IN_USB_REPORT; i++)
-        if (report->keycode[i])
-            return false;
-
-    return true;
-}
-
-/* True if the only thing held is the leader key (no other keys, no modifiers). */
-static bool report_is_leader_only(const hid_keyboard_report_t *report) {
-    if (report->modifier)
-        return false;
-
-    bool leader_seen = false;
-    for (int i = 0; i < KEYS_IN_USB_REPORT; i++) {
-        uint8_t key = report->keycode[i];
-        if (key == 0)
-            continue;
-        if (key == HOTKEY_LEADER_KEY)
-            leader_seen = true;
-        else
-            return false; /* some other key is held */
-    }
-    return leader_seen;
-}
-
-/* Leader-key state machine states (device_t.leader_state). */
-enum {
-    LEADER_IDLE = 0,   /* not in a sequence */
-    LEADER_FIRST_TAP,  /* first leader tap seen, waiting for the second (double-tap) */
-    LEADER_ARMED,      /* leader confirmed, waiting for a selector key */
-    LEADER_SWALLOW,    /* selector fired, swallow held keys until released */
+/* Leader-key switching configuration, built from user_config.h. */
+static const leader_cfg_t leader_cfg = {
+    .leader_key    = HOTKEY_LEADER_KEY,
+    .select_a      = HOTKEY_SELECT_A,
+    .select_b      = HOTKEY_SELECT_B,
+    .toggle        = HOTKEY_SWITCH_TOGGLE,
+    .double_tap    = HOTKEY_LEADER_DOUBLE_TAP,
+    .tap_window_ms = HOTKEY_LEADER_TAP_WINDOW_MS,
+    .timeout_ms    = HOTKEY_LEADER_TIMEOUT_MS,
 };
 
-/* Drive the output-switching leader sequence for one keyboard report.
-   Returns true if the report was consumed (withheld / handled) and must NOT be
-   forwarded to the PC; false if it should be processed normally. */
+/* Run the (pure) leader state machine for one report and apply its decision.
+   Returns true if the report was consumed and must NOT be forwarded to the PC. */
 static bool handle_output_leader(device_t *state, hid_keyboard_report_t *report) {
-    const bool leader_dn = key_in_report(HOTKEY_LEADER_KEY, report);
-    const bool rising    = leader_dn && !state->leader_prev_down;
-    state->leader_prev_down = leader_dn;
+    leader_report_t lr = {.modifier = report->modifier};
+    for (int i = 0; i < LEADER_KEYS && i < KEYS_IN_USB_REPORT; i++)
+        lr.keycode[i] = report->keycode[i];
 
-    /* Fast path: the vast majority of reports are normal typing with no sequence
-       in progress. Do the minimum work and return before any timers/selectors. */
-    if (state->leader_state == LEADER_IDLE && !rising)
-        return false;
-
-    const uint64_t now = time_us_64();
-    const bool empty   = report_is_empty(report);
-
-    switch (state->leader_state) {
-        case LEADER_SWALLOW:
-            /* Keep eating the still-held selector/leader keys until full release. */
-            if (empty)
-                state->leader_state = LEADER_IDLE;
-            return !empty;
-
-        case LEADER_ARMED: {
-            if (now - state->leader_time > (uint64_t)HOTKEY_LEADER_TIMEOUT_MS * 1000) {
-                state->leader_state = LEADER_IDLE;
-                break; /* window expired: fall through to normal handling */
-            }
-            /* Look up the selector only now that we are actually armed. */
-            action_handler_t selector = NULL;
-            if (key_in_report(HOTKEY_SELECT_A, report))
-                selector = &select_output_a_hotkey_handler;
-            else if (key_in_report(HOTKEY_SELECT_B, report))
-                selector = &select_output_b_hotkey_handler;
-            else if (key_in_report(HOTKEY_SWITCH_TOGGLE, report))
-                selector = &output_toggle_hotkey_handler;
-
-            if (selector) {
-                blink_led(state);
-                selector(state, report);
-                state->leader_state = LEADER_SWALLOW;
-                return true;
-            }
-            /* Still holding/releasing the leader, or nothing yet: keep waiting. */
-            if (leader_dn || empty)
-                return true;
-            /* A different key: sequence abandoned, let it through (leader dropped). */
-            state->leader_state = LEADER_IDLE;
-            break;
-        }
-
-        case LEADER_FIRST_TAP:
-            if (now - state->leader_time > (uint64_t)HOTKEY_LEADER_TAP_WINDOW_MS * 1000) {
-                state->leader_state = LEADER_IDLE;
-                break; /* too slow for a double-tap: treat as a fresh report */
-            }
-            if (rising) { /* second tap within the window -> armed */
-                state->leader_state = LEADER_ARMED;
-                state->leader_time  = now;
-                return true;
-            }
-            if (leader_dn || empty)
-                return true; /* holding/releasing the first tap: keep waiting */
-            state->leader_state = LEADER_IDLE;
-            break;
-
-        case LEADER_IDLE:
+    switch (leader_process(&state->leader, &leader_cfg, &lr, time_us_64())) {
+        case LEADER_SWITCH_A:
+            blink_led(state);
+            select_output_a_hotkey_handler(state, report);
+            return true;
+        case LEADER_SWITCH_B:
+            blink_led(state);
+            select_output_b_hotkey_handler(state, report);
+            return true;
+        case LEADER_SWITCH_TOGGLE:
+            blink_led(state);
+            output_toggle_hotkey_handler(state, report);
+            return true;
+        case LEADER_CONSUME:
+            return true;
+        case LEADER_PASS:
         default:
-            break;
+            return false;
     }
-
-    /* Arm on a fresh leader tap (its own key, nothing else held). */
-    if (state->leader_state == LEADER_IDLE && rising && report_is_leader_only(report)) {
-#if HOTKEY_LEADER_DOUBLE_TAP
-        state->leader_state = LEADER_FIRST_TAP;
-#else
-        state->leader_state = LEADER_ARMED;
-#endif
-        state->leader_time = now;
-        return true;
-    }
-
-    return false;
 }
 
 /* ==================================================== *

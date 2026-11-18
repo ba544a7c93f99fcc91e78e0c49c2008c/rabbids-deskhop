@@ -12,6 +12,7 @@
 
 #include <stdint.h>
 #include "flash.h"
+#include "leader.h"
 #include "packet.h"
 #include "screen.h"
 
@@ -167,11 +168,9 @@ typedef struct {
     bool keyboard_connected; // True when our keyboard is connected locally
     bool mouse_connected;    // True when our mouse is connected locally
 
-    /* Leader-key output switching (anti-phantom). Tap(s) of the leader key are
-       withheld from the PC; a selector key then switches output. */
-    uint8_t  leader_state;        // 0 idle, 1 first tap seen, 2 armed, 3 swallow until release
-    uint64_t leader_time;         // Timestamp of the last leader state transition
-    bool     leader_prev_down;    // Was the leader key held in the previous report (edge detect)
+    /* Leader-key output switching (anti-phantom). Pure state machine in leader.c:
+       tap(s) of the leader key are withheld from the PC, a selector then switches. */
+    leader_state_t leader;
 
     /* USB identity cloning (replicate the keyboard's VID/PID/strings on the outputs) */
     usb_identity_t present_identity;        // Identity currently announced to the host

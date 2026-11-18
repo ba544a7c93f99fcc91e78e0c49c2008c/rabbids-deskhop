@@ -65,6 +65,7 @@ set(COMMON_SOURCES
   ${SRC_DIR}/utils.c
   ${SRC_DIR}/handlers.c
   ${SRC_DIR}/identity.c
+  ${SRC_DIR}/leader.c
   ${SRC_DIR}/setup.c
   ${SRC_DIR}/keyboard.c
   ${SRC_DIR}/mouse.c
