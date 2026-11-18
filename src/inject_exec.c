@@ -23,6 +23,14 @@
 
 #include "inject.h"
 
+#include <stdio.h>
+
+/* Bumped when a line is refused for backpressure (queue full) or because it was
+   too long; surfaced by /status so an operator/script can see dropped input. */
+static uint32_t dropped_lines;
+
+#define INJECT_PROTO_VERSION 1
+
 #define STEP_KBD   0
 #define STEP_MOUSE 1
 #define STEP_DELAY 2
@@ -74,6 +82,11 @@ static bool ring_push(const inject_step_t *s) {
 /* Number of free slots in the ring (capacity is INJECT_RING - 1). */
 static uint16_t ring_free(void) {
     return (uint16_t)((ring_tail - ring_head - 1 + INJECT_RING) % INJECT_RING);
+}
+
+/* Number of steps currently queued (pending emission). */
+static uint16_t ring_count(void) {
+    return (uint16_t)((ring_head - ring_tail + INJECT_RING) % INJECT_RING);
 }
 
 static bool ring_pop(inject_step_t *s) {
@@ -252,12 +265,123 @@ static bool inject_exec_cmd(const inject_cmd_t *c) {
     }
 }
 
+/* --- control plane: /help, /contract, /status, /version ---------------- */
+
+/* Case-insensitive match of a control-command word; the word ends at the first
+   space/CR or the string end, so trailing arguments are ignored. */
+static bool meta_eq(const char *a, const char *lit) {
+    while (*lit) {
+        char ca = *a, cl = *lit;
+        if (ca >= 'A' && ca <= 'Z') ca += 32;
+        if (cl >= 'A' && cl <= 'Z') cl += 32;
+        if (ca != cl)
+            return false;
+        a++; lit++;
+    }
+    return *a == '\0' || *a == ' ' || *a == '\t' || *a == '\r';
+}
+
+/* Human-readable command reference (the "usage contract"). */
+static void meta_help(uint8_t itf) {
+    tud_cdc_n_write_str(itf,
+        "DeskHop COM injection commands:\r\n"
+        "  type <text>                    literal ASCII (US layout)\r\n"
+        "  key <chord>                    tap one chord, e.g. ctrl+alt+del\r\n"
+        "  shortcut <chord> [chord...]    tap chords in order, e.g. ctrl+k ctrl+s\r\n"
+        "  key_down|down <chord>          press and hold\r\n"
+        "  key_up|up <chord>              release\r\n"
+        "  release_all|release            release all keys and buttons\r\n"
+        "  move <dx> <dy>                 relative move (-32767..32767)\r\n"
+        "  moveto <x> <y>                 absolute move (0..32767)\r\n"
+        "  click [button] [count] [mods]  count 1..9, mods held for the click\r\n"
+        "  mouse_down|mdown [button]      hold a mouse button\r\n"
+        "  mouse_up|mup [button]          release a mouse button\r\n"
+        "  drag <dx> <dy> [button] [mods] press, move, release\r\n"
+        "  scroll <n> [mods]              wheel, n=-127..127\r\n"
+        "  delay <ms>                     wait milliseconds\r\n"
+        "  target <local|remote>          where to inject (default remote)\r\n"
+        "button: left|right|middle   mods: ctrl(primary) shift alt gui(win|cmd), joined with +\r\n"
+        "control: /help /contract /status /version   ('ok' = queued, poll /status for drain)\r\n");
+}
+
+/* Compact, machine-parsable grammar: a count line, then one line per verb. */
+static void meta_contract(uint8_t itf) {
+    tud_cdc_n_write_str(itf,
+        "contract 15\r\n"
+        "type <text>\r\n"
+        "key <chord>\r\n"
+        "shortcut <chord>...\r\n"
+        "key_down <chord>\r\n"
+        "key_up <chord>\r\n"
+        "release_all\r\n"
+        "move <dx> <dy>\r\n"
+        "moveto <x> <y>\r\n"
+        "click [button] [count] [mods]\r\n"
+        "mouse_down [button]\r\n"
+        "mouse_up [button]\r\n"
+        "drag <dx> <dy> [button] [mods]\r\n"
+        "scroll <n> [mods]\r\n"
+        "delay <ms>\r\n"
+        "target local|remote\r\n");
+}
+
+/* One-line live snapshot of the injector state. */
+static void meta_status(uint8_t itf) {
+    uint8_t nkeys = 0;
+    for (int i = 0; i < 6; i++)
+        if (held_keys[i])
+            nkeys++;
+
+    char line[128];
+    snprintf(line, sizeof(line),
+             "status target=%s queued=%u held_mod=0x%02X held_keys=%u held_btn=0x%02X dropped=%lu\r\n",
+             cur_target == INJECT_TARGET_REMOTE ? "remote" : "local",
+             (unsigned)ring_count(), (unsigned)held_mod, (unsigned)nkeys,
+             (unsigned)held_btn, (unsigned long)dropped_lines);
+    tud_cdc_n_write_str(itf, line);
+}
+
+/* Dispatch a control line (starts with '/'). Returns true if it was one. These
+   never inject and always answer, even when the injection queue is full. */
+static bool inject_meta(uint8_t itf, const char *line) {
+    if (*line != '/')
+        return false;
+
+    const char *c = line + 1;
+    if (meta_eq(c, "help") || meta_eq(c, "?")) {
+        meta_help(itf);
+    } else if (meta_eq(c, "contract")) {
+        meta_contract(itf);
+    } else if (meta_eq(c, "status")) {
+        meta_status(itf);
+    } else if (meta_eq(c, "version")) {
+        char line2[48];
+        snprintf(line2, sizeof(line2), "DeskHop-inject %d\r\n", INJECT_PROTO_VERSION);
+        tud_cdc_n_write_str(itf, line2);
+    } else {
+        tud_cdc_n_write_str(itf, "err unknown control command (try /help)\r\n");
+    }
+    tud_cdc_n_write_flush(itf);
+    return true;
+}
+
 /* Process one finished command line. */
 static void inject_handle_line(uint8_t itf) {
     linebuf[linelen] = '\0';
 
+    /* Skip leading whitespace so control commands are recognized when indented. */
+    const char *line = linebuf;
+    while (*line == ' ' || *line == '\t')
+        line++;
+
+    /* Control plane (/help, /status, ...) answers locally and injects nothing. */
+    if (inject_meta(itf, line)) {
+        linelen = 0;
+        return;
+    }
+
     inject_cmd_t cmd;
-    inject_parse_line(linebuf, &cmd);
+    inject_parse_line(line, &cmd);
 
     /* Admit a command only when the whole line is guaranteed to fit, so a chord
        can never be queued with its release dropped on overflow (stuck key). If
@@ -268,6 +392,7 @@ static void inject_handle_line(uint8_t itf) {
         ok = false;
     } else if (ring_free() < INJECT_MAX_STEPS_PER_LINE) {
         ok = false; /* backpressure: queue too full to admit atomically */
+        dropped_lines++;
     } else {
         ok = inject_exec_cmd(&cmd);
     }
@@ -292,6 +417,7 @@ void tud_cdc_rx_cb(uint8_t itf) {
                 /* The whole overlong line is dropped, not parsed as fragments. */
                 tud_cdc_n_write_str(itf, "err\r\n");
                 tud_cdc_n_write_flush(itf);
+                dropped_lines++;
                 line_overflow = false;
                 linelen = 0;
             } else if (linelen > 0) {

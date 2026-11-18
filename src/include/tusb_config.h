@@ -99,9 +99,10 @@
 extern int dh_debug_printf(const char *__restrict __format, ...);
 #endif
 
-// Buffer sizes for CDC RX and TX.
+// Buffer sizes for CDC RX and TX. TX is large enough to hold a full multi-line
+// /help reply from the injection control plane in one write.
 #define CFG_TUD_CDC_RX_BUFSIZE 64
-#define CFG_TUD_CDC_TX_BUFSIZE 64
+#define CFG_TUD_CDC_TX_BUFSIZE 2048
 
 // Line coding settings to use on CDC enumeration.
 #define CFG_TUH_CDC_LINE_CODING_ON_ENUM \

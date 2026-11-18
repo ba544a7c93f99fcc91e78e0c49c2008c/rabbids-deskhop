@@ -102,6 +102,28 @@ scroll -3 ctrl              # zoom arrière
 release_all
 ```
 
+## 3b. Plan de contrôle (`/commandes`)
+
+Faute de serveur MCP (le Pico est un périphérique USB, pas un hôte), le port COM
+est **auto-descriptif** : les commandes préfixées par `/` n'injectent **jamais**
+rien et répondent toujours en local (même file pleine).
+
+| Commande | Effet |
+|---|---|
+| `/help` (`/?`) | Référence lisible des commandes (le « contrat d'usage ») |
+| `/contract` | Grammaire compacte **parsable** : une ligne `contract <N>` puis N lignes, une par verbe |
+| `/status` | Instantané : `target`, `queued` (steps en file), `held_mod`/`held_keys`/`held_btn` (état tenu), `dropped` (lignes refusées cumulées) |
+| `/version` | `DeskHop-inject <n>` (détection de capacités côté script) |
+
+> **`ok` = mis en file, pas « exécuté ».** Une séquence longue se joue à
+> ~250 rapports/s. Pour savoir quand c'est terminé, *poll* `/status` jusqu'à
+> `queued=0`. `dropped` qui augmente = file saturée (ralentir) ou ligne trop longue.
+
+```
+/status
+status target=remote queued=12 held_mod=0x01 held_keys=0 held_btn=0x01 dropped=0
+```
+
 ## 4. Fonctionnement technique
 
 - **Parser pur** (`src/inject.c`, testé) : transforme une ligne en `inject_cmd_t`
