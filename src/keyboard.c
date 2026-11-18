@@ -188,20 +188,17 @@ enum {
    Returns true if the report was consumed (withheld / handled) and must NOT be
    forwarded to the PC; false if it should be processed normally. */
 static bool handle_output_leader(device_t *state, hid_keyboard_report_t *report) {
-    const uint64_t now   = time_us_64();
-    const bool leader_dn  = key_in_report(HOTKEY_LEADER_KEY, report);
-    const bool rising     = leader_dn && !state->leader_prev_down;
-    const bool empty      = report_is_empty(report);
+    const bool leader_dn = key_in_report(HOTKEY_LEADER_KEY, report);
+    const bool rising    = leader_dn && !state->leader_prev_down;
     state->leader_prev_down = leader_dn;
 
-    /* Which selector, if any, is pressed in this report. */
-    action_handler_t selector = NULL;
-    if (key_in_report(HOTKEY_SELECT_A, report))
-        selector = &select_output_a_hotkey_handler;
-    else if (key_in_report(HOTKEY_SELECT_B, report))
-        selector = &select_output_b_hotkey_handler;
-    else if (key_in_report(HOTKEY_SWITCH_TOGGLE, report))
-        selector = &output_toggle_hotkey_handler;
+    /* Fast path: the vast majority of reports are normal typing with no sequence
+       in progress. Do the minimum work and return before any timers/selectors. */
+    if (state->leader_state == LEADER_IDLE && !rising)
+        return false;
+
+    const uint64_t now = time_us_64();
+    const bool empty   = report_is_empty(report);
 
     switch (state->leader_state) {
         case LEADER_SWALLOW:
@@ -210,11 +207,20 @@ static bool handle_output_leader(device_t *state, hid_keyboard_report_t *report)
                 state->leader_state = LEADER_IDLE;
             return !empty;
 
-        case LEADER_ARMED:
+        case LEADER_ARMED: {
             if (now - state->leader_time > (uint64_t)HOTKEY_LEADER_TIMEOUT_MS * 1000) {
                 state->leader_state = LEADER_IDLE;
                 break; /* window expired: fall through to normal handling */
             }
+            /* Look up the selector only now that we are actually armed. */
+            action_handler_t selector = NULL;
+            if (key_in_report(HOTKEY_SELECT_A, report))
+                selector = &select_output_a_hotkey_handler;
+            else if (key_in_report(HOTKEY_SELECT_B, report))
+                selector = &select_output_b_hotkey_handler;
+            else if (key_in_report(HOTKEY_SWITCH_TOGGLE, report))
+                selector = &output_toggle_hotkey_handler;
+
             if (selector) {
                 blink_led(state);
                 selector(state, report);
@@ -227,6 +233,7 @@ static bool handle_output_leader(device_t *state, hid_keyboard_report_t *report)
             /* A different key: sequence abandoned, let it through (leader dropped). */
             state->leader_state = LEADER_IDLE;
             break;
+        }
 
         case LEADER_FIRST_TAP:
             if (now - state->leader_time > (uint64_t)HOTKEY_LEADER_TAP_WINDOW_MS * 1000) {
