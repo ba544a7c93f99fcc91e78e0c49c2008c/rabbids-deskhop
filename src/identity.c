@@ -97,8 +97,11 @@ static void apply_identity(device_t *state, const usb_identity_t *id) {
  * runs at a time, driven on core1, so module-static state is safe. */
 enum { CAP_IDLE = 0, CAP_DEVICE, CAP_MFR, CAP_PROD, CAP_SER, CAP_DONE };
 
+#define CAPTURE_TIMEOUT_US 1000000u /* abort a capture stuck mid-transfer after 1 s */
+
 static volatile uint8_t cap_phase = CAP_IDLE;
 static uint8_t  cap_addr;
+static uint64_t cap_start_us;
 static usb_identity_t cap_id;
 static uint16_t cap_buf[64]; /* holds the device descriptor or one string descriptor */
 
@@ -181,9 +184,16 @@ void identity_capture_task(device_t *state) {
         return;
     }
 
-    /* A capture is already in flight (async): wait for it. */
-    if (cap_phase != CAP_IDLE)
+    /* A capture is already in flight (async): wait for it, but abort if a
+       transfer never completes (e.g. the device vanished mid-capture) so the
+       feature can't get stuck. A late callback then hits the default case. */
+    if (cap_phase != CAP_IDLE) {
+        if (time_us_64() - cap_start_us > CAPTURE_TIMEOUT_US) {
+            cap_phase = CAP_IDLE;
+            state->identity_capture_addr = 0;
+        }
         return;
+    }
 
     /* Start a new capture: VID/PID are available without a transfer. */
     uint16_t vid = 0, pid = 0;
@@ -196,7 +206,8 @@ void identity_capture_task(device_t *state) {
     cap_id.vid = vid;
     cap_id.pid = pid;
     cap_id.bcd = 0x0100;
-    cap_addr   = state->identity_capture_addr;
+    cap_addr     = state->identity_capture_addr;
+    cap_start_us = time_us_64();
 
     cap_phase = CAP_DEVICE;
     if (!tuh_descriptor_get_device(cap_addr, cap_buf, sizeof(tusb_desc_device_t), capture_cb, 0))
