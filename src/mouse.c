@@ -268,6 +268,11 @@ void switch_virtual_desktop(device_t *state, output_t *output, int new_index, in
 void do_screen_switch(device_t *state, int direction) {
     output_t *output = &state->config.output[state->active_output];
 
+    /* Hotkey-only mode: never switch by moving the mouse to the screen border.
+       The output-toggle hotkey still works (it does not check this flag). */
+    if (state->config.switch_hotkey_only)
+        return;
+
     /* No switching allowed if explicitly disabled or in gaming mode */
     if (state->switch_lock || state->gaming_mode)
         return;

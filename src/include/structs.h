@@ -12,6 +12,7 @@
 
 #include <stdint.h>
 #include "flash.h"
+#include "leader.h"
 #include "packet.h"
 #include "screen.h"
 
@@ -65,6 +66,23 @@ typedef struct {
     bool upgrade_in_progress; // True if firmware transfer from the other box is in progress
 } fw_upgrade_state_t;
 
+/* USB identity (VID/PID/strings) captured from a connected device and replicated
+   on the outputs. Also used as the on-wire serialization between the two boards,
+   so it must stay packed and byte-for-byte identical on both. */
+#define USB_IDENTITY_MAGIC   0xD5
+#define USB_IDENTITY_STR_LEN 32   /* includes the NUL terminator; 31 usable chars */
+
+typedef struct __attribute__((packed)) {
+    uint8_t  magic;   // USB_IDENTITY_MAGIC when this record is meaningful
+    uint8_t  valid;   // 1 once an identity has been captured
+    uint16_t vid;
+    uint16_t pid;
+    uint16_t bcd;
+    char manufacturer[USB_IDENTITY_STR_LEN];
+    char product[USB_IDENTITY_STR_LEN];
+    char serial[USB_IDENTITY_STR_LEN];
+} usb_identity_t;
+
 typedef struct {
     uint32_t magic_header;
     uint32_t version;
@@ -84,7 +102,16 @@ typedef struct {
     /* If not set to zero (previously reserved), gaming mode should be active by default */
     uint8_t gaming_mode_default;
     uint8_t led_mode;
-    uint8_t _reserved[2];
+
+    /* When set, replicate the connected keyboard's USB identity on both outputs. */
+    uint8_t clone_usb_identity;
+
+    /* When set, outputs switch only via the hotkey, never by the mouse hitting
+       a screen border. */
+    uint8_t switch_hotkey_only;
+
+    /* Last captured identity, persisted so the outputs don't change across reboots. */
+    usb_identity_t stored_identity;
 
     // Keep checksum at the end of the struct
     uint32_t checksum;
@@ -140,6 +167,19 @@ typedef struct {
     bool tud_connected;      // True when TinyUSB device successfully connects
     bool keyboard_connected; // True when our keyboard is connected locally
     bool mouse_connected;    // True when our mouse is connected locally
+
+    /* Leader-key output switching (anti-phantom). Pure state machine in leader.c:
+       tap(s) of the leader key are withheld from the PC, a selector then switches. */
+    leader_state_t leader;
+
+    /* USB identity cloning (replicate the keyboard's VID/PID/strings on the outputs) */
+    usb_identity_t present_identity;        // Identity currently announced to the host
+    volatile uint8_t identity_capture_addr; // Nonzero: core1 should capture this device's identity
+    volatile bool identity_push_pending;    // core1 should (re)transmit identity to the other board
+    volatile uint16_t identity_push_offset; // Progress of the chunked UART transmission
+    volatile bool identity_reenum_pending;  // core0 should re-enumerate the device port
+    uint8_t  identity_rx_buf[sizeof(usb_identity_t)]; // Reassembly buffer for incoming identity
+    uint16_t identity_rx_len;               // Bytes received so far into identity_rx_buf
 
     /* Feature flags */
     bool mouse_zoom;         // True when "mouse zoom" is enabled

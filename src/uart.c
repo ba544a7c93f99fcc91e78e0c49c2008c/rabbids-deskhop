@@ -83,6 +83,7 @@ const uart_handler_t uart_handler[] = {
     {.type = SET_VAL_MSG, .handler = handle_api_msgs},
 
     /* Firmware */
+    {.type = IDENTITY_SYNC_MSG, .handler = handle_identity_sync_msg},
     {.type = REQUEST_BYTE_MSG, .handler = handle_request_byte_msg},
     {.type = RESPONSE_BYTE_MSG, .handler = handle_response_byte_msg},
     {.type = FIRMWARE_UPGRADE_MSG, .handler = handle_fw_upgrade_msg},

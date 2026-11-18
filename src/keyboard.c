@@ -16,12 +16,8 @@
  * ==================================================== */
 
 hotkey_combo_t hotkeys[] = {
-    /* Main keyboard switching hotkey */
-    {.modifier       = HOTKEY_MODIFIER,
-     .keys           = {HOTKEY_TOGGLE},
-     .key_count      = 1,
-     .pass_to_os     = false,
-     .action_handler = &output_toggle_hotkey_handler},
+    /* Output switching is handled by the leader-key state machine below, not by
+       this table (see process_keyboard_report / handle_output_leader). */
 
     /* Pressing right ALT + right CTRL toggles the slow mouse mode */
     {.modifier       = KEYBOARD_MODIFIER_RIGHTALT | KEYBOARD_MODIFIER_RIGHTCTRL,
@@ -148,6 +144,45 @@ hotkey_combo_t *check_all_hotkeys(hid_keyboard_report_t *report, device_t *state
     }
 
     return NULL;
+}
+
+/* Leader-key switching configuration, built from user_config.h. */
+static const leader_cfg_t leader_cfg = {
+    .leader_key    = HOTKEY_LEADER_KEY,
+    .select_a      = HOTKEY_SELECT_A,
+    .select_b      = HOTKEY_SELECT_B,
+    .toggle        = HOTKEY_SWITCH_TOGGLE,
+    .double_tap    = HOTKEY_LEADER_DOUBLE_TAP,
+    .tap_window_ms = HOTKEY_LEADER_TAP_WINDOW_MS,
+    .timeout_ms    = HOTKEY_LEADER_TIMEOUT_MS,
+};
+
+/* Run the (pure) leader state machine for one report and apply its decision.
+   Returns true if the report was consumed and must NOT be forwarded to the PC. */
+static bool handle_output_leader(device_t *state, hid_keyboard_report_t *report) {
+    leader_report_t lr = {.modifier = report->modifier};
+    for (int i = 0; i < LEADER_KEYS && i < KEYS_IN_USB_REPORT; i++)
+        lr.keycode[i] = report->keycode[i];
+
+    switch (leader_process(&state->leader, &leader_cfg, &lr, time_us_64())) {
+        case LEADER_SWITCH_A:
+            blink_led(state);
+            select_output_a_hotkey_handler(state, report);
+            return true;
+        case LEADER_SWITCH_B:
+            blink_led(state);
+            select_output_b_hotkey_handler(state, report);
+            return true;
+        case LEADER_SWITCH_TOGGLE:
+            blink_led(state);
+            output_toggle_hotkey_handler(state, report);
+            return true;
+        case LEADER_CONSUME:
+            return true;
+        case LEADER_PASS:
+        default:
+            return false;
+    }
 }
 
 /* ==================================================== *
@@ -316,7 +351,12 @@ void process_keyboard_report(uint8_t *raw_report, int length, uint8_t itf, hid_i
     /* Update the keyboard state for this device */
     update_kbd_state(state, &new_report, itf);
 
-    /* Check if any hotkey was pressed */
+    /* Output-switching leader sequence (tap the leader key, then a selector).
+       When it consumes the report, nothing is forwarded -> no phantom key. */
+    if (handle_output_leader(state, &new_report))
+        return;
+
+    /* Check if any (non-switching) hotkey was pressed */
     hotkey = check_all_hotkeys(&new_report, state);
 
     /* ... and take appropriate action */

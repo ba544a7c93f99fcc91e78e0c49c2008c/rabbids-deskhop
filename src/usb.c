@@ -220,6 +220,9 @@ void tuh_hid_mount_cb(uint8_t dev_addr, uint8_t instance, uint8_t const *desc_re
             global_state.kbd_dev_addr       = dev_addr;
             global_state.kbd_instance       = instance;
             global_state.keyboard_connected = true;
+
+            /* Replicate this keyboard's USB identity onto the outputs (if enabled). */
+            identity_request_capture(&global_state, dev_addr);
             break;
 
         case HID_ITF_PROTOCOL_MOUSE:

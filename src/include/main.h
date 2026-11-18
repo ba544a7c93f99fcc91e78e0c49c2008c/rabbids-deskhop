@@ -36,6 +36,7 @@
 #include "firmware.h"
 #include "flash.h"
 #include "handlers.h"
+#include "identity.h"
 #include "keyboard.h"
 #include "mouse.h"
 #include "packet.h"

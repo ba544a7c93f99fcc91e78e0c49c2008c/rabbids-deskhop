@@ -69,6 +69,37 @@
 #define HOTKEY_MODIFIER  KEYBOARD_MODIFIER_LEFTCTRL
 #define HOTKEY_TOGGLE    HID_KEY_CAPS_LOCK
 
+/* --- Output switching: "leader key" sequence (anti-phantom) ------------------
+ *
+ * Proven hardware-KVM pattern (Aten & co): DOUBLE-TAP a dead key, then a
+ * selector. Double-tapping avoids arming on an accidental single press.
+ *
+ *   Scroll Lock, Scroll Lock, then F1  -> always output A
+ *   Scroll Lock, Scroll Lock, then F2  -> always output B
+ *   Scroll Lock, Scroll Lock, then F3  -> toggle A<->B
+ *
+ * The leader taps are withheld from the PC, so NO phantom key is sent. Scroll
+ * Lock is the least-used key on a desktop PC keyboard; being a dead key, dropping
+ * it when the sequence is abandoned is invisible. A diverging keypress ends the
+ * sequence immediately (no added latency), so everyday typing is never delayed.
+ *
+ * On an Apple keyboard (no Scroll Lock), use e.g. HID_KEY_F13 as the leader.
+ */
+#define HOTKEY_LEADER_KEY         HID_KEY_SCROLL_LOCK
+#define HOTKEY_SELECT_A           HID_KEY_F1
+#define HOTKEY_SELECT_B           HID_KEY_F2
+#define HOTKEY_SWITCH_TOGGLE      HID_KEY_F3
+
+/* 1 = double-tap the leader to arm (robust, KVM standard); 0 = single tap. */
+#define HOTKEY_LEADER_DOUBLE_TAP  1
+
+/* Max gap (ms) between the two leader taps to count as a double-tap. */
+#define HOTKEY_LEADER_TAP_WINDOW_MS 400
+
+/* How long (ms) the armed leader waits for a selector key. ~1500 ms is
+ * comfortable; raise it for a longer think time. A diverging key cancels early. */
+#define HOTKEY_LEADER_TIMEOUT_MS  1500
+
 /**================================================== *
  * ==============  Mouse Speed Factor  ============== *
  * ================================================== *
@@ -226,3 +257,49 @@
  * */
 
 #define ENFORCE_KEYBOARD_BOOT_PROTOCOL 0
+
+
+/**================================================== *
+ * ============  Clone USB Identity ================= *
+ * ================================================== *
+ *
+ * If enabled, the switch dynamically replicates the connected
+ * keyboard's USB identity (VID, PID, bcdDevice, manufacturer,
+ * product and serial strings) on BOTH outputs, so both computers
+ * see the same device identity as the real keyboard.
+ *
+ * The board the keyboard is plugged into captures the identity and
+ * shares it with the other board over UART; the captured value is
+ * stored in flash so it stays stable across reboots.
+ *
+ * Note: a USB port can only carry one VID/PID, so the mouse keeps
+ * working but its own identity is not replicated. Config mode always
+ * keeps the stock DeskHop identity.
+ *
+ * CLONE_USB_IDENTITY: [0, 1] - 1 clone the keyboard identity onto the outputs
+ *                            - 0 keep the (compile-time) static identity
+ *
+ * */
+
+#define CLONE_USB_IDENTITY 1
+
+
+/**================================================== *
+ * ===========  Switch On Hotkey Only =============== *
+ * ================================================== *
+ *
+ * By default DeskHop switches outputs both via the hotkey AND
+ * by dragging the mouse across the screen border (the two screens
+ * behave like one continuous desktop).
+ *
+ * If you run two independent computers, each with its own single
+ * screen, and only want to switch with the keyboard shortcut, enable
+ * this. The mouse then never switches outputs on its own; the active
+ * computer keeps receiving input until you press the hotkey again.
+ *
+ * SWITCH_HOTKEY_ONLY: [0, 1] - 1 switch only via the hotkey (no border switch)
+ *                            - 0 stock behaviour (hotkey + mouse border)
+ *
+ * */
+
+#define SWITCH_HOTKEY_ONLY 1
