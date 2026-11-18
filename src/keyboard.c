@@ -16,32 +16,8 @@
  * ==================================================== */
 
 hotkey_combo_t hotkeys[] = {
-    /* Main keyboard switching hotkey */
-    /* Toggle A<->B. Guarded: no part of the combo reaches the PC. */
-    {.modifier       = HOTKEY_SWITCH_MODIFIER,
-     .keys           = {HOTKEY_SWITCH_ARM, HOTKEY_SWITCH_TOGGLE},
-     .key_count      = 2,
-     .pass_to_os     = false,
-     .guard          = true,
-     .action_handler = &output_toggle_hotkey_handler},
-
-    /* Dedicated: always switch to output A */
-    {.modifier       = HOTKEY_SWITCH_MODIFIER,
-     .keys           = {HOTKEY_SWITCH_ARM, HOTKEY_SELECT_A},
-     .key_count      = 2,
-     .pass_to_os     = false,
-     .acknowledge    = true,
-     .guard          = true,
-     .action_handler = &select_output_a_hotkey_handler},
-
-    /* Dedicated: always switch to output B */
-    {.modifier       = HOTKEY_SWITCH_MODIFIER,
-     .keys           = {HOTKEY_SWITCH_ARM, HOTKEY_SELECT_B},
-     .key_count      = 2,
-     .pass_to_os     = false,
-     .acknowledge    = true,
-     .guard          = true,
-     .action_handler = &select_output_b_hotkey_handler},
+    /* Output switching is handled by the leader-key state machine below, not by
+       this table (see process_keyboard_report / handle_output_leader). */
 
     /* Pressing right ALT + right CTRL toggles the slow mouse mode */
     {.modifier       = KEYBOARD_MODIFIER_RIGHTALT | KEYBOARD_MODIFIER_RIGHTCTRL,
@@ -182,64 +158,108 @@ static bool report_is_empty(const hid_keyboard_report_t *report) {
     return true;
 }
 
-/* True if everything currently held is a strict subset of some guarded hotkey,
-   i.e. the user could still complete that hotkey by pressing more keys. Such a
-   report is withheld from the PC so no phantom key leaks. A report that already
-   holds a key/modifier outside every guarded hotkey has "diverged" and is let
-   through immediately. */
-static bool report_is_guarded_prefix(const hid_keyboard_report_t *report) {
-    if (report_is_empty(report))
+/* True if the only thing held is the leader key (no other keys, no modifiers). */
+static bool report_is_leader_only(const hid_keyboard_report_t *report) {
+    if (report->modifier)
         return false;
 
-    for (int n = 0; n < ARRAY_SIZE(hotkeys); n++) {
-        hotkey_combo_t *h = &hotkeys[n];
-        if (!h->guard)
+    bool leader_seen = false;
+    for (int i = 0; i < KEYS_IN_USB_REPORT; i++) {
+        uint8_t key = report->keycode[i];
+        if (key == 0)
             continue;
+        if (key == HOTKEY_LEADER_KEY)
+            leader_seen = true;
+        else
+            return false; /* some other key is held */
+    }
+    return leader_seen;
+}
 
-        /* Any modifier held must belong to this hotkey's modifier set. */
-        if (report->modifier & ~h->modifier)
-            continue;
+/* Leader-key state machine states (device_t.leader_state). */
+enum {
+    LEADER_IDLE = 0,   /* not in a sequence */
+    LEADER_FIRST_TAP,  /* first leader tap seen, waiting for the second (double-tap) */
+    LEADER_ARMED,      /* leader confirmed, waiting for a selector key */
+    LEADER_SWALLOW,    /* selector fired, swallow held keys until released */
+};
 
-        /* Any key held must be one of this hotkey's keys. */
-        bool keys_subset = true;
-        for (int i = 0; i < KEYS_IN_USB_REPORT && keys_subset; i++) {
-            uint8_t key = report->keycode[i];
-            if (key == 0)
-                continue;
+/* Drive the output-switching leader sequence for one keyboard report.
+   Returns true if the report was consumed (withheld / handled) and must NOT be
+   forwarded to the PC; false if it should be processed normally. */
+static bool handle_output_leader(device_t *state, hid_keyboard_report_t *report) {
+    const uint64_t now   = time_us_64();
+    const bool leader_dn  = key_in_report(HOTKEY_LEADER_KEY, report);
+    const bool rising     = leader_dn && !state->leader_prev_down;
+    const bool empty      = report_is_empty(report);
+    state->leader_prev_down = leader_dn;
 
-            bool found = false;
-            for (int j = 0; j < h->key_count; j++) {
-                if (h->keys[j] == key) {
-                    found = true;
-                    break;
-                }
+    /* Which selector, if any, is pressed in this report. */
+    action_handler_t selector = NULL;
+    if (key_in_report(HOTKEY_SELECT_A, report))
+        selector = &select_output_a_hotkey_handler;
+    else if (key_in_report(HOTKEY_SELECT_B, report))
+        selector = &select_output_b_hotkey_handler;
+    else if (key_in_report(HOTKEY_SWITCH_TOGGLE, report))
+        selector = &output_toggle_hotkey_handler;
+
+    switch (state->leader_state) {
+        case LEADER_SWALLOW:
+            /* Keep eating the still-held selector/leader keys until full release. */
+            if (empty)
+                state->leader_state = LEADER_IDLE;
+            return !empty;
+
+        case LEADER_ARMED:
+            if (now - state->leader_time > (uint64_t)HOTKEY_LEADER_TIMEOUT_MS * 1000) {
+                state->leader_state = LEADER_IDLE;
+                break; /* window expired: fall through to normal handling */
             }
-            if (!found)
-                keys_subset = false;
-        }
+            if (selector) {
+                blink_led(state);
+                selector(state, report);
+                state->leader_state = LEADER_SWALLOW;
+                return true;
+            }
+            /* Still holding/releasing the leader, or nothing yet: keep waiting. */
+            if (leader_dn || empty)
+                return true;
+            /* A different key: sequence abandoned, let it through (leader dropped). */
+            state->leader_state = LEADER_IDLE;
+            break;
 
-        if (keys_subset)
-            return true;
+        case LEADER_FIRST_TAP:
+            if (now - state->leader_time > (uint64_t)HOTKEY_LEADER_TAP_WINDOW_MS * 1000) {
+                state->leader_state = LEADER_IDLE;
+                break; /* too slow for a double-tap: treat as a fresh report */
+            }
+            if (rising) { /* second tap within the window -> armed */
+                state->leader_state = LEADER_ARMED;
+                state->leader_time  = now;
+                return true;
+            }
+            if (leader_dn || empty)
+                return true; /* holding/releasing the first tap: keep waiting */
+            state->leader_state = LEADER_IDLE;
+            break;
+
+        case LEADER_IDLE:
+        default:
+            break;
+    }
+
+    /* Arm on a fresh leader tap (its own key, nothing else held). */
+    if (state->leader_state == LEADER_IDLE && rising && report_is_leader_only(report)) {
+#if HOTKEY_LEADER_DOUBLE_TAP
+        state->leader_state = LEADER_FIRST_TAP;
+#else
+        state->leader_state = LEADER_ARMED;
+#endif
+        state->leader_time = now;
+        return true;
     }
 
     return false;
-}
-
-/* Release a withheld guarded prefix to the PC when the user holds it without
-   completing or diverging (e.g. the arming modifiers held together with the
-   mouse). Runs periodically on the core that processes keyboard reports. */
-void hotkey_buffer_flush_task(device_t *state) {
-    if (!state->hotkey_buffering)
-        return;
-
-    if (time_us_64() - state->hotkey_buffer_time < (uint64_t)HOTKEY_BUFFER_TIMEOUT_MS * 1000)
-        return;
-
-    /* Flush: send the current combined state and stop withholding. Latch
-       passthrough so we don't immediately re-buffer the still-held prefix. */
-    state->hotkey_buffering   = false;
-    state->hotkey_passthrough = true;
-    send_key(&state->hotkey_buffered_report, state);
 }
 
 /* ==================================================== *
@@ -408,7 +428,12 @@ void process_keyboard_report(uint8_t *raw_report, int length, uint8_t itf, hid_i
     /* Update the keyboard state for this device */
     update_kbd_state(state, &new_report, itf);
 
-    /* Check if any hotkey was pressed */
+    /* Output-switching leader sequence (tap the leader key, then a selector).
+       When it consumes the report, nothing is forwarded -> no phantom key. */
+    if (handle_output_leader(state, &new_report))
+        return;
+
+    /* Check if any (non-switching) hotkey was pressed */
     hotkey = check_all_hotkeys(&new_report, state);
 
     /* ... and take appropriate action */
@@ -420,41 +445,9 @@ void process_keyboard_report(uint8_t *raw_report, int length, uint8_t itf, hid_i
         /* Execute the corresponding handler */
         hotkey->action_handler(state, &new_report);
 
-        /* The combo completed: discard any withheld prefix so none of it leaks. */
-        state->hotkey_buffering   = false;
-        state->hotkey_passthrough = false;
-
         /* And pass the key to the output PC if configured to do so. */
-        if (!hotkey->pass_to_os) {
-            /* Guarded combo: keep withholding the still-held keys until they are
-               released, so their trailing modifiers don't leak after switching. */
-            state->hotkey_swallow_until_release = hotkey->guard;
+        if (!hotkey->pass_to_os)
             return;
-        }
-    }
-    else if (report_is_empty(&new_report)) {
-        /* All keys released: reset the anti-phantom state machine. */
-        state->hotkey_buffering             = false;
-        state->hotkey_passthrough           = false;
-        state->hotkey_swallow_until_release = false;
-    }
-    else if (state->hotkey_swallow_until_release) {
-        /* Keys from a completed guarded combo are still held: withhold them. */
-        return;
-    }
-    else if (!state->hotkey_passthrough && report_is_guarded_prefix(&new_report)) {
-        /* Still possibly on the way to a guarded hotkey: withhold from the PC. */
-        if (!state->hotkey_buffering)
-            state->hotkey_buffer_time = time_us_64();
-        state->hotkey_buffering       = true;
-        state->hotkey_buffered_report = new_report;
-        return;
-    }
-    else {
-        /* Diverged from every guarded hotkey (or passthrough latched): let it
-           through. The current report carries the full key state, so nothing is
-           lost by not replaying the withheld intermediate report. */
-        state->hotkey_buffering = false;
     }
 
     /* This method will decide if the key gets queued locally or sent through UART */

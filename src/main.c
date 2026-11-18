@@ -66,7 +66,6 @@ void core1_main() {
         [6] = {.exec = &heartbeat_output_task,   .frequency = _HZ(1)},       // | Output periodic heartbeats
         [7] = {.exec = &identity_capture_task,   .frequency = _HZ(20)},      // | Read a connected keyboard's USB identity
         [8] = {.exec = &identity_send_task,      .frequency = _HZ(500)},     // | Stream captured identity to the other board
-        [9] = {.exec = &hotkey_buffer_flush_task, .frequency = _HZ(1000)},   // | Release a withheld hotkey prefix after timeout
     };                                                                       // `----- then go back and repeat forever
     const int NUM_TASKS = ARRAY_SIZE(tasks_core1);
 

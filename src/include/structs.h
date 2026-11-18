@@ -29,7 +29,6 @@ typedef struct {
     action_handler_t action_handler;  // What to execute when the key combination is detected
     bool pass_to_os;                  // True if we are to pass the key to the OS too
     bool acknowledge;                 // True if we are to notify the user about registering keypress
-    bool guard;                       // True = withhold partial presses so no phantom key reaches the PC
 } hotkey_combo_t;
 
 typedef struct TU_ATTR_PACKED {
@@ -168,12 +167,11 @@ typedef struct {
     bool keyboard_connected; // True when our keyboard is connected locally
     bool mouse_connected;    // True when our mouse is connected locally
 
-    /* Anti-phantom hotkey buffering: withhold partial hotkey presses from the PC */
-    bool hotkey_buffering;                        // True while a guarded prefix is withheld
-    bool hotkey_passthrough;                       // True after a timeout flush, until keys released
-    bool hotkey_swallow_until_release;             // True after a guarded combo fired, until keys released
-    uint64_t hotkey_buffer_time;                  // When the current withhold started
-    hid_keyboard_report_t hotkey_buffered_report; // The last withheld report (for timeout flush)
+    /* Leader-key output switching (anti-phantom). Tap(s) of the leader key are
+       withheld from the PC; a selector key then switches output. */
+    uint8_t  leader_state;        // 0 idle, 1 first tap seen, 2 armed, 3 swallow until release
+    uint64_t leader_time;         // Timestamp of the last leader state transition
+    bool     leader_prev_down;    // Was the leader key held in the previous report (edge detect)
 
     /* USB identity cloning (replicate the keyboard's VID/PID/strings on the outputs) */
     usb_identity_t present_identity;        // Identity currently announced to the host

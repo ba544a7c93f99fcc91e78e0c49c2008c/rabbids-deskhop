@@ -69,35 +69,36 @@
 #define HOTKEY_MODIFIER  KEYBOARD_MODIFIER_LEFTCTRL
 #define HOTKEY_TOGGLE    HID_KEY_CAPS_LOCK
 
-/* --- Output switching hotkeys (anti-phantom) ---------------------------------
+/* --- Output switching: "leader key" sequence (anti-phantom) ------------------
  *
- * These switch outputs AND are "guarded": every partial press is withheld from
- * the PC until the firmware knows whether the combo completes, so NO part of the
- * combination (not even the leading modifier) is ever delivered. See
- * HOTKEY_SWITCHING.md for the full rationale and the alternatives considered.
+ * Proven hardware-KVM pattern (Aten & co): DOUBLE-TAP a dead key, then a
+ * selector. Double-tapping avoids arming on an accidental single press.
  *
- * The arming key is Scroll Lock: statistically the least-used key on a desktop
- * PC keyboard, so withholding it has essentially no everyday cost. Because the
- * combo is swallowed, Scroll Lock's own state is never toggled on the PC.
- * (On an Apple keyboard without Scroll Lock, use F13 or a right-side modifier
- * instead - see HOTKEY_SWITCHING.md.)
+ *   Scroll Lock, Scroll Lock, then F1  -> always output A
+ *   Scroll Lock, Scroll Lock, then F2  -> always output B
+ *   Scroll Lock, Scroll Lock, then F3  -> toggle A<->B
  *
- *   HOTKEY_SWITCH_ARM + HOTKEY_SELECT_A -> always output A
- *   HOTKEY_SWITCH_ARM + HOTKEY_SELECT_B -> always output B
- *   HOTKEY_SWITCH_ARM + HOTKEY_SWITCH_TOGGLE -> toggle A<->B
+ * The leader taps are withheld from the PC, so NO phantom key is sent. Scroll
+ * Lock is the least-used key on a desktop PC keyboard; being a dead key, dropping
+ * it when the sequence is abandoned is invisible. A diverging keypress ends the
+ * sequence immediately (no added latency), so everyday typing is never delayed.
  *
- * HOTKEY_SWITCH_MODIFIER is an optional extra modifier (0 = none).
+ * On an Apple keyboard (no Scroll Lock), use e.g. HID_KEY_F13 as the leader.
  */
-#define HOTKEY_SWITCH_MODIFIER 0
-#define HOTKEY_SWITCH_ARM      HID_KEY_SCROLL_LOCK
-#define HOTKEY_SELECT_A        HID_KEY_F1
-#define HOTKEY_SELECT_B        HID_KEY_F2
-#define HOTKEY_SWITCH_TOGGLE   HID_KEY_F3
+#define HOTKEY_LEADER_KEY         HID_KEY_SCROLL_LOCK
+#define HOTKEY_SELECT_A           HID_KEY_F1
+#define HOTKEY_SELECT_B           HID_KEY_F2
+#define HOTKEY_SWITCH_TOGGLE      HID_KEY_F3
 
-/* How long (ms) a lone guarded prefix (e.g. just the arming modifiers held) is
- * withheld before being released to the PC, for the rare case of holding it with
- * the mouse. A diverging keypress flushes immediately regardless of this. */
-#define HOTKEY_BUFFER_TIMEOUT_MS 60
+/* 1 = double-tap the leader to arm (robust, KVM standard); 0 = single tap. */
+#define HOTKEY_LEADER_DOUBLE_TAP  1
+
+/* Max gap (ms) between the two leader taps to count as a double-tap. */
+#define HOTKEY_LEADER_TAP_WINDOW_MS 400
+
+/* How long (ms) the armed leader waits for a selector key. ~1500 ms is
+ * comfortable; raise it for a longer think time. A diverging key cancels early. */
+#define HOTKEY_LEADER_TIMEOUT_MS  1500
 
 /**================================================== *
  * ==============  Mouse Speed Factor  ============== *
