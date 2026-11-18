@@ -10,6 +10,9 @@
  */
 #include "main.h"
 
+/* save_config() writes the whole config_t into a single flash page, so it must fit. */
+_Static_assert(sizeof(config_t) <= FLASH_PAGE_SIZE, "config_t must fit in one flash page");
+
 /* Default configuration */
 const config_t default_config = {
     .magic_header = 0xB00B1E5,
@@ -62,4 +65,7 @@ const config_t default_config = {
     .kbd_led_as_indicator = KBD_LED_AS_INDICATOR,
     .jump_threshold = JUMP_THRESHOLD,
     .led_mode = LED_ACTIVE_OUTPUT,
+    .clone_usb_identity = CLONE_USB_IDENTITY,
+    .switch_hotkey_only = SWITCH_HOTKEY_ONLY,
+    .stored_identity = { .magic = 0, .valid = 0 },
 };

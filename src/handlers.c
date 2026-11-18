@@ -25,6 +25,16 @@ void output_toggle_hotkey_handler(device_t *state, hid_keyboard_report_t *report
     set_active_output(state, state->active_output);
 };
 
+/* Dedicated hotkey: always select output A (guaranteed, ignores switch lock). */
+void select_output_a_hotkey_handler(device_t *state, hid_keyboard_report_t *report) {
+    set_active_output(state, OUTPUT_A);
+};
+
+/* Dedicated hotkey: always select output B (guaranteed, ignores switch lock). */
+void select_output_b_hotkey_handler(device_t *state, hid_keyboard_report_t *report) {
+    set_active_output(state, OUTPUT_B);
+};
+
 void _get_border_position(device_t *state, border_size_t *border) {
     /* To avoid having 2 different keys, if we're above half, it's the top coord */
     if (state->pointer_y > (MAX_SCREEN_COORD / 2))

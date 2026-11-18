@@ -27,6 +27,8 @@ void fw_upgrade_hotkey_handler_B(device_t *, hid_keyboard_report_t *);
 void mouse_zoom_hotkey_handler(device_t *, hid_keyboard_report_t *);
 void output_config_hotkey_handler(device_t *, hid_keyboard_report_t *);
 void output_toggle_hotkey_handler(device_t *, hid_keyboard_report_t *);
+void select_output_a_hotkey_handler(device_t *, hid_keyboard_report_t *);
+void select_output_b_hotkey_handler(device_t *, hid_keyboard_report_t *);
 void screen_border_hotkey_handler(device_t *, hid_keyboard_report_t *);
 void screenlock_hotkey_handler(device_t *, hid_keyboard_report_t *);
 void switchlock_hotkey_handler(device_t *, hid_keyboard_report_t *);

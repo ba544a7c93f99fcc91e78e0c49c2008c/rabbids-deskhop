@@ -42,6 +42,7 @@ void     combine_kbd_states(device_t *, hid_keyboard_report_t *);
 bool     key_in_report(uint8_t, const hid_keyboard_report_t *);
 void     process_consumer_report(uint8_t *, int, uint8_t, hid_interface_t *);
 void     process_keyboard_report(uint8_t *, int, uint8_t, hid_interface_t *);
+void     hotkey_buffer_flush_task(device_t *);
 void     process_system_report(uint8_t *, int, uint8_t, hid_interface_t *);
 void     queue_cc_packet(uint8_t *, device_t *);
 void     queue_kbd_report(hid_keyboard_report_t *, device_t *);

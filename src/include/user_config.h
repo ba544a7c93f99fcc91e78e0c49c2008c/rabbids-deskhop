@@ -69,6 +69,31 @@
 #define HOTKEY_MODIFIER  KEYBOARD_MODIFIER_LEFTCTRL
 #define HOTKEY_TOGGLE    HID_KEY_CAPS_LOCK
 
+/* --- Output switching hotkeys (anti-phantom) ---------------------------------
+ *
+ * These switch outputs AND are "guarded": every partial press is withheld from
+ * the PC until the firmware knows whether the combo completes, so NO part of the
+ * combination (not even the leading modifier) is ever delivered. See
+ * HOTKEY_SWITCHING.md for the full rationale and the alternatives considered.
+ *
+ * The arming modifier uses the RIGHT-side Ctrl+Shift on purpose: left-side
+ * Ctrl/Shift (used in everyday shortcuts and mouse combos) are then never
+ * withheld, so normal typing keeps zero added latency.
+ *
+ *   HOTKEY_SWITCH_MODIFIER + HOTKEY_SELECT_A -> always output A
+ *   HOTKEY_SWITCH_MODIFIER + HOTKEY_SELECT_B -> always output B
+ *   HOTKEY_SWITCH_MODIFIER + HOTKEY_SWITCH_TOGGLE -> toggle A<->B
+ */
+#define HOTKEY_SWITCH_MODIFIER (KEYBOARD_MODIFIER_RIGHTCTRL | KEYBOARD_MODIFIER_RIGHTSHIFT)
+#define HOTKEY_SELECT_A        HID_KEY_F1
+#define HOTKEY_SELECT_B        HID_KEY_F2
+#define HOTKEY_SWITCH_TOGGLE   HID_KEY_F3
+
+/* How long (ms) a lone guarded prefix (e.g. just the arming modifiers held) is
+ * withheld before being released to the PC, for the rare case of holding it with
+ * the mouse. A diverging keypress flushes immediately regardless of this. */
+#define HOTKEY_BUFFER_TIMEOUT_MS 60
+
 /**================================================== *
  * ==============  Mouse Speed Factor  ============== *
  * ================================================== *
@@ -226,3 +251,49 @@
  * */
 
 #define ENFORCE_KEYBOARD_BOOT_PROTOCOL 0
+
+
+/**================================================== *
+ * ============  Clone USB Identity ================= *
+ * ================================================== *
+ *
+ * If enabled, the switch dynamically replicates the connected
+ * keyboard's USB identity (VID, PID, bcdDevice, manufacturer,
+ * product and serial strings) on BOTH outputs, so both computers
+ * see the same device identity as the real keyboard.
+ *
+ * The board the keyboard is plugged into captures the identity and
+ * shares it with the other board over UART; the captured value is
+ * stored in flash so it stays stable across reboots.
+ *
+ * Note: a USB port can only carry one VID/PID, so the mouse keeps
+ * working but its own identity is not replicated. Config mode always
+ * keeps the stock DeskHop identity.
+ *
+ * CLONE_USB_IDENTITY: [0, 1] - 1 clone the keyboard identity onto the outputs
+ *                            - 0 keep the (compile-time) static identity
+ *
+ * */
+
+#define CLONE_USB_IDENTITY 1
+
+
+/**================================================== *
+ * ===========  Switch On Hotkey Only =============== *
+ * ================================================== *
+ *
+ * By default DeskHop switches outputs both via the hotkey AND
+ * by dragging the mouse across the screen border (the two screens
+ * behave like one continuous desktop).
+ *
+ * If you run two independent computers, each with its own single
+ * screen, and only want to switch with the keyboard shortcut, enable
+ * this. The mouse then never switches outputs on its own; the active
+ * computer keeps receiving input until you press the hotkey again.
+ *
+ * SWITCH_HOTKEY_ONLY: [0, 1] - 1 switch only via the hotkey (no border switch)
+ *                            - 0 stock behaviour (hotkey + mouse border)
+ *
+ * */
+
+#define SWITCH_HOTKEY_ONLY 1

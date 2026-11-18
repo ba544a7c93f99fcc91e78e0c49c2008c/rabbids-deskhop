@@ -30,6 +30,7 @@ int main(void) {
         [3] = {.exec = &process_mouse_queue_task, .frequency = _HZ(2000)},   // | Check if there were any mouse movements and send them
         [4] = {.exec = &process_hid_queue_task,   .frequency = _HZ(1000)},   // | Check if there are any packets to send over vendor link
         [5] = {.exec = &process_uart_tx_task,     .frequency = _TOP()},      // | Check if there are any packets to send over UART
+        [6] = {.exec = &identity_reenumerate_task, .frequency = _HZ(60)},    // | Re-enumerate when a cloned USB identity changes
     };                                                                       // `----- then go back and repeat forever
     const int NUM_TASKS = ARRAY_SIZE(tasks_core0);
 
@@ -63,6 +64,9 @@ void core1_main() {
         [4] = {.exec = &screensaver_task,        .frequency = _HZ(120)},     // | Handle "screensaver" movements
         [5] = {.exec = &firmware_upgrade_task,   .frequency = _HZ(4000)},    // | Send firmware to the other board if needed
         [6] = {.exec = &heartbeat_output_task,   .frequency = _HZ(1)},       // | Output periodic heartbeats
+        [7] = {.exec = &identity_capture_task,   .frequency = _HZ(20)},      // | Read a connected keyboard's USB identity
+        [8] = {.exec = &identity_send_task,      .frequency = _HZ(500)},     // | Stream captured identity to the other board
+        [9] = {.exec = &hotkey_buffer_flush_task, .frequency = _HZ(1000)},   // | Release a withheld hotkey prefix after timeout
     };                                                                       // `----- then go back and repeat forever
     const int NUM_TASKS = ARRAY_SIZE(tasks_core1);
 

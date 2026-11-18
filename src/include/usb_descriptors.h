@@ -28,7 +28,7 @@
 #define REPORT_ID_VENDOR 6
 
 
-#define DEVICE_DESCRIPTOR(vid, pid) \
+#define DEVICE_DESCRIPTOR(vid, pid, bcd) \
 {.bLength         = sizeof(tusb_desc_device_t),\
   .bDescriptorType = TUSB_DESC_DEVICE,\
   .bcdUSB          = 0x0200,\
@@ -38,7 +38,7 @@
   .bMaxPacketSize0 = CFG_TUD_ENDPOINT0_SIZE,\
   .idVendor  = vid,\
   .idProduct = pid,\
-  .bcdDevice = 0x0100,\
+  .bcdDevice = bcd,\
   .iManufacturer = 0x01,\
   .iProduct      = 0x02,\
   .iSerialNumber = 0x03,\

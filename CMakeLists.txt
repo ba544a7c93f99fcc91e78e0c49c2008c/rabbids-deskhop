@@ -14,6 +14,9 @@ set(DP_PIN_DEFAULT 14 CACHE STRING "Default USB D+ Pin Number")
 set(PIO_USE_TINYUSB 1 CACHE STRING "Make TinyUSB Manage the PIO USB Port")
 set(PICO_BOARD "pico")
 
+## USB Identity (VID/PID/strings announced by board A and B)
+include(${CMAKE_CURRENT_LIST_DIR}/misc/usb_identity/UsbIdentity.cmake)
+
 ## Pico SDK Configuration
 set(PICO_SDK_FETCH_FROM_GIT off)
 set(PICO_SDK_PATH ${CMAKE_CURRENT_LIST_DIR}/pico-sdk)
@@ -61,6 +64,7 @@ set(COMMON_SOURCES
   ${SRC_DIR}/hid_report.c
   ${SRC_DIR}/utils.c
   ${SRC_DIR}/handlers.c
+  ${SRC_DIR}/identity.c
   ${SRC_DIR}/setup.c
   ${SRC_DIR}/keyboard.c
   ${SRC_DIR}/mouse.c
@@ -77,6 +81,7 @@ set(COMMON_SOURCES
 ## Include Directories
 set(COMMON_INCLUDES
   ${SRC_DIR}/include
+  ${DH_USB_IDENTITY_DIR}
   ${PICO_PIO_USB_DIR}/src
 )
 

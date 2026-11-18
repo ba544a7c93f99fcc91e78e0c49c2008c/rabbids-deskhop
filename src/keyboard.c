@@ -17,11 +17,31 @@
 
 hotkey_combo_t hotkeys[] = {
     /* Main keyboard switching hotkey */
-    {.modifier       = HOTKEY_MODIFIER,
-     .keys           = {HOTKEY_TOGGLE},
+    /* Toggle A<->B. Guarded: no part of the combo reaches the PC. */
+    {.modifier       = HOTKEY_SWITCH_MODIFIER,
+     .keys           = {HOTKEY_SWITCH_TOGGLE},
      .key_count      = 1,
      .pass_to_os     = false,
+     .guard          = true,
      .action_handler = &output_toggle_hotkey_handler},
+
+    /* Dedicated: always switch to output A */
+    {.modifier       = HOTKEY_SWITCH_MODIFIER,
+     .keys           = {HOTKEY_SELECT_A},
+     .key_count      = 1,
+     .pass_to_os     = false,
+     .acknowledge    = true,
+     .guard          = true,
+     .action_handler = &select_output_a_hotkey_handler},
+
+    /* Dedicated: always switch to output B */
+    {.modifier       = HOTKEY_SWITCH_MODIFIER,
+     .keys           = {HOTKEY_SELECT_B},
+     .key_count      = 1,
+     .pass_to_os     = false,
+     .acknowledge    = true,
+     .guard          = true,
+     .action_handler = &select_output_b_hotkey_handler},
 
     /* Pressing right ALT + right CTRL toggles the slow mouse mode */
     {.modifier       = KEYBOARD_MODIFIER_RIGHTALT | KEYBOARD_MODIFIER_RIGHTCTRL,
@@ -148,6 +168,78 @@ hotkey_combo_t *check_all_hotkeys(hid_keyboard_report_t *report, device_t *state
     }
 
     return NULL;
+}
+
+/* True if the report holds no modifiers and no keys. */
+static bool report_is_empty(const hid_keyboard_report_t *report) {
+    if (report->modifier)
+        return false;
+
+    for (int i = 0; i < KEYS_IN_USB_REPORT; i++)
+        if (report->keycode[i])
+            return false;
+
+    return true;
+}
+
+/* True if everything currently held is a strict subset of some guarded hotkey,
+   i.e. the user could still complete that hotkey by pressing more keys. Such a
+   report is withheld from the PC so no phantom key leaks. A report that already
+   holds a key/modifier outside every guarded hotkey has "diverged" and is let
+   through immediately. */
+static bool report_is_guarded_prefix(const hid_keyboard_report_t *report) {
+    if (report_is_empty(report))
+        return false;
+
+    for (int n = 0; n < ARRAY_SIZE(hotkeys); n++) {
+        hotkey_combo_t *h = &hotkeys[n];
+        if (!h->guard)
+            continue;
+
+        /* Any modifier held must belong to this hotkey's modifier set. */
+        if (report->modifier & ~h->modifier)
+            continue;
+
+        /* Any key held must be one of this hotkey's keys. */
+        bool keys_subset = true;
+        for (int i = 0; i < KEYS_IN_USB_REPORT && keys_subset; i++) {
+            uint8_t key = report->keycode[i];
+            if (key == 0)
+                continue;
+
+            bool found = false;
+            for (int j = 0; j < h->key_count; j++) {
+                if (h->keys[j] == key) {
+                    found = true;
+                    break;
+                }
+            }
+            if (!found)
+                keys_subset = false;
+        }
+
+        if (keys_subset)
+            return true;
+    }
+
+    return false;
+}
+
+/* Release a withheld guarded prefix to the PC when the user holds it without
+   completing or diverging (e.g. the arming modifiers held together with the
+   mouse). Runs periodically on the core that processes keyboard reports. */
+void hotkey_buffer_flush_task(device_t *state) {
+    if (!state->hotkey_buffering)
+        return;
+
+    if (time_us_64() - state->hotkey_buffer_time < (uint64_t)HOTKEY_BUFFER_TIMEOUT_MS * 1000)
+        return;
+
+    /* Flush: send the current combined state and stop withholding. Latch
+       passthrough so we don't immediately re-buffer the still-held prefix. */
+    state->hotkey_buffering   = false;
+    state->hotkey_passthrough = true;
+    send_key(&state->hotkey_buffered_report, state);
 }
 
 /* ==================================================== *
@@ -328,9 +420,41 @@ void process_keyboard_report(uint8_t *raw_report, int length, uint8_t itf, hid_i
         /* Execute the corresponding handler */
         hotkey->action_handler(state, &new_report);
 
+        /* The combo completed: discard any withheld prefix so none of it leaks. */
+        state->hotkey_buffering   = false;
+        state->hotkey_passthrough = false;
+
         /* And pass the key to the output PC if configured to do so. */
-        if (!hotkey->pass_to_os)
+        if (!hotkey->pass_to_os) {
+            /* Guarded combo: keep withholding the still-held keys until they are
+               released, so their trailing modifiers don't leak after switching. */
+            state->hotkey_swallow_until_release = hotkey->guard;
             return;
+        }
+    }
+    else if (report_is_empty(&new_report)) {
+        /* All keys released: reset the anti-phantom state machine. */
+        state->hotkey_buffering             = false;
+        state->hotkey_passthrough           = false;
+        state->hotkey_swallow_until_release = false;
+    }
+    else if (state->hotkey_swallow_until_release) {
+        /* Keys from a completed guarded combo are still held: withhold them. */
+        return;
+    }
+    else if (!state->hotkey_passthrough && report_is_guarded_prefix(&new_report)) {
+        /* Still possibly on the way to a guarded hotkey: withhold from the PC. */
+        if (!state->hotkey_buffering)
+            state->hotkey_buffer_time = time_us_64();
+        state->hotkey_buffering       = true;
+        state->hotkey_buffered_report = new_report;
+        return;
+    }
+    else {
+        /* Diverged from every guarded hotkey (or passthrough latched): let it
+           through. The current report carries the full key state, so nothing is
+           lost by not replaying the withheld intermediate report. */
+        state->hotkey_buffering = false;
     }
 
     /* This method will decide if the key gets queued locally or sent through UART */
