@@ -1,18 +1,26 @@
-# Host-compiled unit tests for the pure leader-key module.
+# Host-compiled unit tests for the pure, hardware-independent modules.
 # Requires only plain gcc (no ARM toolchain, no pico-sdk).
 
 CC      ?= gcc
 CFLAGS  ?= -std=c11 -I../src/include -Wall -Wextra -O2
-SRC      = ../src/leader.c test_leader.c
-BIN      = test_leader
+
+LEADER_SRC = ../src/leader.c test_leader.c
+LEADER_BIN = test_leader
+
+INJECT_SRC = ../src/inject.c test_inject.c
+INJECT_BIN = test_inject
 
 .PHONY: test clean
 
-test: $(BIN)
-	./$(BIN)
+test: $(LEADER_BIN) $(INJECT_BIN)
+	./$(LEADER_BIN)
+	./$(INJECT_BIN)
 
-$(BIN): $(SRC) ../src/include/leader.h
-	$(CC) $(CFLAGS) -o $(BIN) $(SRC)
+$(LEADER_BIN): $(LEADER_SRC) ../src/include/leader.h
+	$(CC) $(CFLAGS) -o $(LEADER_BIN) $(LEADER_SRC)
+
+$(INJECT_BIN): $(INJECT_SRC) ../src/include/inject.h
+	$(CC) $(CFLAGS) -o $(INJECT_BIN) $(INJECT_SRC)
 
 clean:
-	rm -f $(BIN)
+	rm -f $(LEADER_BIN) $(INJECT_BIN)

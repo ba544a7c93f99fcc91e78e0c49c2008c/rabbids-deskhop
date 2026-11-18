@@ -31,6 +31,9 @@ int main(void) {
         [4] = {.exec = &process_hid_queue_task,   .frequency = _HZ(1000)},   // | Check if there are any packets to send over vendor link
         [5] = {.exec = &process_uart_tx_task,     .frequency = _TOP()},      // | Check if there are any packets to send over UART
         [6] = {.exec = &identity_reenumerate_task, .frequency = _HZ(60)},    // | Re-enumerate when a cloned USB identity changes
+#ifdef DH_INJECT
+        {.exec = &inject_task,                    .frequency = _HZ(1000)},   // | Emit queued COM-injection steps (controller board only)
+#endif
     };                                                                       // `----- then go back and repeat forever
     const int NUM_TASKS = ARRAY_SIZE(tasks_core0);
 

@@ -8,6 +8,7 @@ set(VERSION_MINOR 80)
 ## Release Type Selection
 option(DH_DEBUG "Build a debug version" OFF)
 option(DH_DEBUG_CDC_FLASH "Enable CDC command to trigger bootloader mode" OFF)
+option(DH_INJECT "Expose a CDC (COM) port for keyboard/mouse injection into the other PC" OFF)
 
 ## Hardware Configuration
 set(DP_PIN_DEFAULT 14 CACHE STRING "Default USB D+ Pin Number")
@@ -65,6 +66,8 @@ set(COMMON_SOURCES
   ${SRC_DIR}/utils.c
   ${SRC_DIR}/handlers.c
   ${SRC_DIR}/identity.c
+  ${SRC_DIR}/inject.c
+  ${SRC_DIR}/inject_exec.c
   ${SRC_DIR}/leader.c
   ${SRC_DIR}/setup.c
   ${SRC_DIR}/keyboard.c
@@ -130,6 +133,10 @@ endif()
 
 if (DH_DEBUG_CDC_FLASH)
   add_definitions(-DDH_DEBUG_CDC_FLASH)
+endif()
+
+if (DH_INJECT)
+  add_definitions(-DDH_INJECT)
 endif()
   
 target_include_directories(${binary} PUBLIC ${COMMON_INCLUDES})
