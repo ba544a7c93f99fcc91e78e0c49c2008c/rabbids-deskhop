@@ -265,6 +265,13 @@ static void test_parse_delay(void) {
 
     inject_parse_line("delay -1", &cmd);
     CHECK(cmd.kind == INJ_ERROR, "delay -1 -> INJ_ERROR");
+
+    /* Oversized numeric token must be rejected, not silently wrapped. */
+    inject_parse_line("delay 4294967297", &cmd);
+    CHECK(cmd.kind == INJ_ERROR, "delay 4294967297 (overflow) -> INJ_ERROR");
+
+    inject_parse_line("move 4294934529 0", &cmd);
+    CHECK(cmd.kind == INJ_ERROR, "move 4294934529 (overflow) -> INJ_ERROR");
 }
 
 static void test_parse_target(void) {

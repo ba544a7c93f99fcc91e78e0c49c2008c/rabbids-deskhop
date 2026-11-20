@@ -140,11 +140,14 @@ Lignes `evt ...` **asynchrones** (préfixe `evt`, à dispatcher à part de `ok`/
 
 ```
 evt switch output=a        # le clavier/souris physique bascule vers A (ou B)
-evt pc port=b state=up     # un PC vient d'apparaître / disparaître sur un port
+evt pc port=b state=up     # un PC apparaît/disparaît sur un port (up|down|unknown)
 evt kbd state=down         # clavier débranché de l'entrée
 evt mouse state=up
 evt link state=down        # on a perdu le heartbeat de l'autre carte
 ```
+
+`state=unknown` pour un `evt pc` = port de l'**autre** carte alors que le lien est
+coupé — exactement le `?` de `/status` (jamais confondu avec un `down` avéré).
 
 > **Présence des deux ports.** Chaque carte connaît directement **son** côté (son
 > PC + le clavier/souris branchés sur elle) et apprend l'autre côté via le

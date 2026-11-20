@@ -21,9 +21,18 @@
 
 #ifdef DH_INJECT
 
+/* Both DH_INJECT and DH_DEBUG_CDC_FLASH want to own tud_cdc_rx_cb() (defined
+   below and in usb.c respectively). They are independent build options, so
+   enabling both would yield two strong definitions and a link error. Fail
+   loudly at compile time instead — they are mutually exclusive by design. */
+#ifdef DH_DEBUG_CDC_FLASH
+#error "DH_INJECT and DH_DEBUG_CDC_FLASH both define tud_cdc_rx_cb; enable only one"
+#endif
+
 #include "inject.h"
 
 #include <stdio.h>
+#include <string.h>
 
 /* Bumped when a line is refused for backpressure (queue full) or because it was
    too long; surfaced by /status so an operator/script can see dropped input. */
@@ -43,15 +52,25 @@ static int8_t log_last_kbd = -1, log_last_mouse = -1;
 static int8_t log_last_link = -1;
 
 static bool peer_link_up(void) {
-    return (time_us_64() - global_state.peer_last_seen) < PEER_LINK_TIMEOUT_US;
+    /* peer_last_seen == 0 means no heartbeat has ever arrived; don't let the
+       zero-initialized value read as a fresh heartbeat during early uptime. */
+    return global_state.peer_last_seen != 0
+        && (time_us_64() - global_state.peer_last_seen) < PEER_LINK_TIMEOUT_US;
 }
 
-/* PC present on a given output: our own side is known directly, the other side
-   from the peer heartbeat (only trustworthy while the link is up). */
-static bool port_pc_up(uint8_t port) {
+/* PC presence on a given output as a tri-state: our own side is known directly,
+   the peer side comes from its heartbeat and is only trustworthy while the link
+   is up. Shared by /status and the event stream so the two never disagree
+   (0 = down, 1 = up, 2 = unknown: peer port while the link is down). */
+#define PC_DOWN    0
+#define PC_UP      1
+#define PC_UNKNOWN 2
+static uint8_t pc_state(uint8_t port) {
     if (port == global_state.board_role)
-        return global_state.tud_connected;
-    return peer_link_up() && (global_state.peer_present_flags & PRESENCE_PC);
+        return global_state.tud_connected ? PC_UP : PC_DOWN;
+    if (!peer_link_up())
+        return PC_UNKNOWN;
+    return (global_state.peer_present_flags & PRESENCE_PC) ? PC_UP : PC_DOWN;
 }
 
 /* A keyboard / mouse is "at the input" if either board hosts one. */
@@ -360,13 +379,13 @@ static void meta_contract(uint8_t itf) {
         "target local|remote\r\n");
 }
 
-/* "up"/"down" for our own port, "?" for the peer port when its link is down. */
+/* "up"/"down" for a known port, "?" for the peer port when its link is down. */
 static const char *pc_token(uint8_t port) {
-    if (port == global_state.board_role)
-        return global_state.tud_connected ? "up" : "down";
-    if (!peer_link_up())
-        return "?";
-    return (global_state.peer_present_flags & PRESENCE_PC) ? "up" : "down";
+    switch (pc_state(port)) {
+        case PC_UP:   return "up";
+        case PC_DOWN: return "down";
+        default:      return "?";
+    }
 }
 
 /* One-line live snapshot of the injector + KVM presence state. */
@@ -502,9 +521,16 @@ void tud_cdc_rx_cb(uint8_t itf) {
 }
 
 /* Emit a single-line event to the control port. */
-static void evt_emit(const char *line) {
+/* Write a whole event line, but only if it fits in the TX FIFO right now, so a
+   near-full FIFO never truncates a line of the line-oriented protocol. Returns
+   false when it didn't fit; the caller then leaves its "last reported" cache
+   untouched so the transition is retried on the next tick (lossless). */
+static bool evt_emit(const char *line) {
+    if (tud_cdc_n_write_available(INJECT_CDC_ITF) < strlen(line))
+        return false;
     tud_cdc_n_write_str(INJECT_CDC_ITF, line);
     tud_cdc_n_write_flush(INJECT_CDC_ITF);
+    return true;
 }
 
 /* When logging is on, emit an event for each change in the physical switch and
@@ -515,38 +541,52 @@ static void inject_log_task(void) {
     if (!log_enabled || !tud_cdc_n_connected(INJECT_CDC_ITF))
         return;
 
+    /* For each field: if it changed, try to emit; only advance the cache once
+       the line was fully written, otherwise bail and retry next tick so no
+       transition is ever dropped or truncated. */
     if ((int8_t)global_state.active_output != log_last_output) {
+        if (!evt_emit(global_state.active_output == OUTPUT_A ? "evt switch output=a\r\n"
+                                                             : "evt switch output=b\r\n"))
+            return;
         log_last_output = (int8_t)global_state.active_output;
-        evt_emit(log_last_output == OUTPUT_A ? "evt switch output=a\r\n"
-                                             : "evt switch output=b\r\n");
     }
 
     int8_t link = peer_link_up() ? 1 : 0;
     if (link != log_last_link) {
+        if (!evt_emit(link ? "evt link state=up\r\n" : "evt link state=down\r\n"))
+            return;
         log_last_link = link;
-        evt_emit(link ? "evt link state=up\r\n" : "evt link state=down\r\n");
     }
 
-    int8_t a = port_pc_up(OUTPUT_A) ? 1 : 0;
+    /* PC presence is tri-state (up/down/unknown) to match /status exactly. */
+    int8_t a = (int8_t)pc_state(OUTPUT_A);
     if (a != log_last_pc_a) {
+        if (!evt_emit(a == PC_UP   ? "evt pc port=a state=up\r\n"
+                    : a == PC_DOWN ? "evt pc port=a state=down\r\n"
+                                   : "evt pc port=a state=unknown\r\n"))
+            return;
         log_last_pc_a = a;
-        evt_emit(a ? "evt pc port=a state=up\r\n" : "evt pc port=a state=down\r\n");
     }
-    int8_t b = port_pc_up(OUTPUT_B) ? 1 : 0;
+    int8_t b = (int8_t)pc_state(OUTPUT_B);
     if (b != log_last_pc_b) {
+        if (!evt_emit(b == PC_UP   ? "evt pc port=b state=up\r\n"
+                    : b == PC_DOWN ? "evt pc port=b state=down\r\n"
+                                   : "evt pc port=b state=unknown\r\n"))
+            return;
         log_last_pc_b = b;
-        evt_emit(b ? "evt pc port=b state=up\r\n" : "evt pc port=b state=down\r\n");
     }
 
     int8_t k = any_kbd() ? 1 : 0;
     if (k != log_last_kbd) {
+        if (!evt_emit(k ? "evt kbd state=up\r\n" : "evt kbd state=down\r\n"))
+            return;
         log_last_kbd = k;
-        evt_emit(k ? "evt kbd state=up\r\n" : "evt kbd state=down\r\n");
     }
     int8_t m = any_mouse() ? 1 : 0;
     if (m != log_last_mouse) {
+        if (!evt_emit(m ? "evt mouse state=up\r\n" : "evt mouse state=down\r\n"))
+            return;
         log_last_mouse = m;
-        evt_emit(m ? "evt mouse state=up\r\n" : "evt mouse state=down\r\n");
     }
 }
 

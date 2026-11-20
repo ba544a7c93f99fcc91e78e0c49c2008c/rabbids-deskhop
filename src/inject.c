@@ -12,6 +12,7 @@
 #include "inject.h"
 
 #include <stddef.h>
+#include <stdint.h>
 #include <string.h>
 
 /* HID usage IDs (keyboard/keypad page) we need, kept local so this module stays
@@ -183,6 +184,11 @@ static bool parse_int(const char *tok, long *out) {
     long v = 0;
     for (; *tok; tok++) {
         if (*tok < '0' || *tok > '9')
+            return false;
+        /* Bound to the int32 range so a value never wraps a 32-bit long on the
+           Pico (where it could otherwise slip past a later range check) and the
+           accept/reject boundary is identical on the 64-bit host test build. */
+        if (v > (INT32_MAX - 9) / 10)
             return false;
         v = v * 10 + (*tok - '0');
     }
